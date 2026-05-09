@@ -75,6 +75,13 @@ Registered tokenizers:
 - `mistral_medium_3_5`
 - `mimo_v2_5_pro`
 
+## Evaluation Goal
+
+The hillclimb target is data-efficient recovery across tokenizers, not just one
+fixture. Serious changes should be evaluated at `100k`, `1m`, and `10m` target
+tokens across several tokenizer pairs. `program.md` defines the current core
+suite and the keep/discard rule.
+
 ## Run One Experiment
 
 ```bash
