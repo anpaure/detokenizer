@@ -157,6 +157,16 @@ def build_tokenizer(name: str) -> TokenizerAdapter:
         return HuggingFaceTokenizerAdapter("gemma4_31b", "gemma", "google/gemma-4-31B")
     if name == "deepseek_v4_pro":
         return HuggingFaceTokenizerAdapter("deepseek_v4_pro", "deepseek", "deepseek-ai/DeepSeek-V4-Pro")
+    if name == "llama3_1_8b":
+        # Official Meta repos are often gated. This public mirror exposes the
+        # Llama 3.1 tokenizer files without requiring HF auth on fresh pods.
+        return HuggingFaceTokenizerAdapter("llama3_1_8b", "llama", "NousResearch/Meta-Llama-3.1-8B")
+    if name == "mistral_medium_3_5":
+        return HuggingFaceTokenizerAdapter("mistral_medium_3_5", "mistral", "mistralai/Mistral-Medium-3.5-128B")
+    if name == "mimo_v2_5_pro":
+        return HuggingFaceTokenizerAdapter("mimo_v2_5_pro", "mimo", "XiaomiMiMo/MiMo-V2.5-Pro")
+    if name == "qwen3_6_27b":
+        return HuggingFaceTokenizerAdapter("qwen3_6_27b", "qwen", "Qwen/Qwen3.6-27B")
     raise KeyError(f"unknown tokenizer: {name}")
 
 

@@ -39,6 +39,25 @@ To set up a new run:
 
 6. Wait for the user to say start.
 
+## Remote Compute Policy
+
+Use the user-provided remote H100/H200 host for full data prep and experiment
+runs. Do not run 100M-token `prepare.py` or `train.py` jobs on the local Mac
+unless the user explicitly asks for a local run.
+
+Local work is limited to editing, git operations, syntax checks, and tiny smoke
+tests. Before starting a real hillclimb, sync the repo to a remote workspace
+such as `/workspace/autoresearch-detokenizer`, then run:
+
+```bash
+uv sync
+HF_HUB_ENABLE_HF_TRANSFER=1 uv run prepare.py
+uv run train.py > run.log 2>&1
+```
+
+All timing, memory, crash logs, and `results.tsv` rows should come from the
+remote GPU environment.
+
 ## Task
 
 Default task:

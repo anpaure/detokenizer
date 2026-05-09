@@ -24,6 +24,13 @@ uv sync
 The default algorithm uses PyTorch for dense GPU similarity scoring. CUDA is
 recommended for the full settings.
 
+## Remote GPU
+
+Run full `prepare.py` and `train.py` jobs on the user-provided remote H100/H200
+host. The local Mac is for editing, syntax checks, and small inspections only.
+Before a hillclimb run, sync this repo to the remote workspace, run `uv sync`
+there, and execute experiments remotely.
+
 ## Prepare
 
 Default setup creates a controlled shuffled-ID fixture:
@@ -60,9 +67,13 @@ Registered tokenizers:
 - `openai_o200k`
 - `openai_cl100k`
 - `qwen3`
+- `qwen3_6_27b`
 - `kimi_k2`
 - `gemma4_31b`
 - `deepseek_v4_pro`
+- `llama3_1_8b`
+- `mistral_medium_3_5`
+- `mimo_v2_5_pro`
 
 ## Run One Experiment
 
