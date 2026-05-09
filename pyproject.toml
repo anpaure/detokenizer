@@ -1,0 +1,24 @@
+[project]
+name = "detokenizer"
+version = "0.1.0"
+description = "Unsupervised experiments for recovering text from shuffled unknown tokenizer IDs."
+requires-python = ">=3.12"
+dependencies = [
+  "datasets>=4.8.5",
+  "hf-transfer>=0.1.9",
+  "numpy>=2.4.4",
+  "rapidfuzz>=3.14.0",
+  "tiktoken>=0.12.0",
+  "tokenizers>=0.22.0,<=0.23.0",
+  "transformers>=4.57.0",
+  "tqdm>=4.67.3",
+  "zstandard>=0.25.0",
+]
+
+[project.optional-dependencies]
+torch = [
+  "torch>=2.0",
+]
+
+[tool.uv]
+package = false

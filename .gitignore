@@ -1,0 +1,23 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+
+.venv/
+.venv*/
+.python-version
+
+.cache/
+.hf/
+zoo_eval/
+*.npy
+*.npz
+*.parquet
+*.txt
+*.report.json
+*.mapping.npy
+
+results*.json
+
+# Old exploratory scripts not part of the published minimal harness.
+detokenizer_attack.py
+neural_mlm_refine.py
