@@ -21,3 +21,12 @@ dev/
 
 # Results file
 results.tsv
+run.log
+*.log
+*.npy
+*.npz
+*.txt
+*.json
+
+# Local cache is outside the repo by default, but keep this ignored for ad hoc runs.
+.cache/

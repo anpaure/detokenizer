@@ -1,389 +1,478 @@
+"""Fixed data prep and evaluation for detokenizer autoresearch.
+
+The mutable experiment lives in train.py. This file owns:
+
+- public reference/target text materialization from FineWeb shards
+- tokenizer adapters and cached tokenized streams
+- shuffled-ID fixture creation
+- fixed oracle metrics for controlled experiments
+
+Agents should not edit this file during a hillclimb run.
 """
-One-time data preparation for autoresearch experiments.
-Downloads data shards and trains a BPE tokenizer.
 
-Usage:
-    python prepare.py                  # full prep (download + tokenizer)
-    python prepare.py --num-shards 8   # download only 8 shards (for testing)
+from __future__ import annotations
 
-Data and tokenizer are stored in ~/.cache/autoresearch/.
-"""
-
-import os
-import sys
-import time
-import math
 import argparse
-import pickle
-from multiprocessing import Pool
+import hashlib
+import json
+import math
+import os
+import re
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable
 
-import requests
+import numpy as np
 import pyarrow.parquet as pq
-import rustbpe
 import tiktoken
-import torch
+from huggingface_hub import hf_hub_download
+from rapidfuzz.distance import Levenshtein
+from transformers import AutoTokenizer
 
 # ---------------------------------------------------------------------------
-# Constants (fixed, do not modify)
+# Fixed task defaults
 # ---------------------------------------------------------------------------
 
-MAX_SEQ_LEN = 2048       # context length
-TIME_BUDGET = 300        # training time budget in seconds (5 minutes)
-EVAL_TOKENS = 40 * 524288  # number of tokens for val eval
+CACHE_DIR = Path(os.path.expanduser("~")) / ".cache" / "detokenizer-autoresearch"
+HF_CACHE_DIR = CACHE_DIR / "hf"
+TEXT_DIR = CACHE_DIR / "text"
+FIXTURE_DIR = CACHE_DIR / "fixtures"
+REF_IDS_DIR = CACHE_DIR / "reference_ids"
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
+FINEWEB_REPO = "HuggingFaceFW/fineweb"
+TARGET_SHARD = "sample/10BT/014_00000.parquet"
+REFERENCE_SHARD = "sample/10BT/013_00000.parquet"
+DEFAULT_TEXT_TOKENS = 100_000_000
+DEFAULT_TARGET_TOKENS = 1_000_000
+DEFAULT_REFERENCE_TOKENS = 100_000_000
+DEFAULT_SEED = 11
+DEFAULT_SAMPLE_TOKENS = 500_000
+DEFAULT_EVAL_CHARS = 50_000
 
-CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "autoresearch")
-DATA_DIR = os.path.join(CACHE_DIR, "data")
-TOKENIZER_DIR = os.path.join(CACHE_DIR, "tokenizer")
-BASE_URL = "https://huggingface.co/datasets/karpathy/climbmix-400b-shuffle/resolve/main"
-MAX_SHARD = 6542 # the last datashard is shard_06542.parquet
-VAL_SHARD = MAX_SHARD  # pinned validation shard (shard_06542)
-VAL_FILENAME = f"shard_{VAL_SHARD:05d}.parquet"
-VOCAB_SIZE = 8192
 
-# BPE split pattern (GPT-4 style, with \p{N}{1,2} instead of {1,3})
-SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
+@dataclass(frozen=True)
+class TokenizerSpec:
+    name: str
+    family: str
+    vocab_size: int
 
-SPECIAL_TOKENS = [f"<|reserved_{i}|>" for i in range(4)]
-BOS_TOKEN = "<|reserved_0|>"
 
-# ---------------------------------------------------------------------------
-# Data download
-# ---------------------------------------------------------------------------
+class TokenizerAdapter:
+    spec: TokenizerSpec
 
-def download_single_shard(index):
-    """Download one parquet shard with retries. Returns True on success."""
-    filename = f"shard_{index:05d}.parquet"
-    filepath = os.path.join(DATA_DIR, filename)
-    if os.path.exists(filepath):
-        return True
+    def encode(self, text: str) -> list[int]:
+        raise NotImplementedError
 
-    url = f"{BASE_URL}/{filename}"
-    max_attempts = 5
-    for attempt in range(1, max_attempts + 1):
+    def encode_batch(self, texts: list[str]) -> list[list[int]]:
+        return [self.encode(text) for text in texts]
+
+    def decode(self, ids: Iterable[int]) -> str:
+        raise NotImplementedError
+
+    def token_bytes(self, token_id: int) -> bytes:
+        raise NotImplementedError
+
+
+class OpenAITiktokenAdapter(TokenizerAdapter):
+    def __init__(self, encoding_name: str):
+        self.encoding_name = encoding_name
+        self.enc = tiktoken.get_encoding(encoding_name)
+        self.spec = TokenizerSpec(
+            name=f"openai_{encoding_name}",
+            family="openai_tiktoken",
+            vocab_size=self.enc.n_vocab,
+        )
+
+    def encode(self, text: str) -> list[int]:
+        return self.enc.encode(text, allowed_special="all")
+
+    def encode_batch(self, texts: list[str]) -> list[list[int]]:
+        return self.enc.encode_batch(texts, allowed_special="all")
+
+    def decode(self, ids: Iterable[int]) -> str:
+        chunks: list[bytes] = []
+        for token_id in ids:
+            try:
+                chunks.append(self.enc.decode_single_token_bytes(int(token_id)))
+            except KeyError:
+                chunks.append(b"\xef\xbf\xbd")
+        return b"".join(chunks).decode("utf-8", errors="replace")
+
+    def token_bytes(self, token_id: int) -> bytes:
         try:
-            response = requests.get(url, stream=True, timeout=30)
-            response.raise_for_status()
-            temp_path = filepath + ".tmp"
-            with open(temp_path, "wb") as f:
-                for chunk in response.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
-                        f.write(chunk)
-            os.rename(temp_path, filepath)
-            print(f"  Downloaded {filename}")
-            return True
-        except (requests.RequestException, IOError) as e:
-            print(f"  Attempt {attempt}/{max_attempts} failed for {filename}: {e}")
-            for path in [filepath + ".tmp", filepath]:
-                if os.path.exists(path):
-                    try:
-                        os.remove(path)
-                    except OSError:
-                        pass
-            if attempt < max_attempts:
-                time.sleep(2 ** attempt)
-    return False
+            return self.enc.decode_single_token_bytes(int(token_id))
+        except KeyError:
+            return f"<INVALID:{token_id}>".encode()
 
 
-def download_data(num_shards, download_workers=8):
-    """Download training shards + pinned validation shard."""
-    os.makedirs(DATA_DIR, exist_ok=True)
-    num_train = min(num_shards, MAX_SHARD)
-    ids = list(range(num_train))
-    if VAL_SHARD not in ids:
-        ids.append(VAL_SHARD)
+class HuggingFaceTokenizerAdapter(TokenizerAdapter):
+    def __init__(self, name: str, family: str, model_id: str):
+        self.model_id = model_id
+        self.tok = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True, use_fast=True)
+        self.spec = TokenizerSpec(name=name, family=family, vocab_size=len(self.tok))
 
-    # Count what's already downloaded
-    existing = sum(1 for i in ids if os.path.exists(os.path.join(DATA_DIR, f"shard_{i:05d}.parquet")))
-    if existing == len(ids):
-        print(f"Data: all {len(ids)} shards already downloaded at {DATA_DIR}")
-        return
+    def encode(self, text: str) -> list[int]:
+        model = getattr(self.tok, "model", None)
+        if hasattr(model, "encode"):
+            return model.encode(text, allowed_special="all")
+        return self.tok.encode(text, add_special_tokens=False)
 
-    needed = len(ids) - existing
-    print(f"Data: downloading {needed} shards ({existing} already exist)...")
+    def encode_batch(self, texts: list[str]) -> list[list[int]]:
+        model = getattr(self.tok, "model", None)
+        if hasattr(model, "encode_batch"):
+            return model.encode_batch(texts, allowed_special="all")
+        return self.tok(texts, add_special_tokens=False, return_attention_mask=False)["input_ids"]
 
-    workers = max(1, min(download_workers, needed))
-    with Pool(processes=workers) as pool:
-        results = pool.map(download_single_shard, ids)
+    def decode(self, ids: Iterable[int]) -> str:
+        model = getattr(self.tok, "model", None)
+        ids_list = list(map(int, ids))
+        if hasattr(model, "decode"):
+            return model.decode(ids_list)
+        return self.tok.decode(ids_list, skip_special_tokens=False, clean_up_tokenization_spaces=False)
 
-    ok = sum(1 for r in results if r)
-    print(f"Data: {ok}/{len(ids)} shards ready at {DATA_DIR}")
-
-# ---------------------------------------------------------------------------
-# Tokenizer training
-# ---------------------------------------------------------------------------
-
-def list_parquet_files():
-    """Return sorted list of parquet file paths in the data directory."""
-    files = sorted(f for f in os.listdir(DATA_DIR) if f.endswith(".parquet") and not f.endswith(".tmp"))
-    return [os.path.join(DATA_DIR, f) for f in files]
-
-
-def text_iterator(max_chars=1_000_000_000, doc_cap=10_000):
-    """Yield documents from training split (all shards except pinned val shard)."""
-    parquet_paths = [p for p in list_parquet_files() if not p.endswith(VAL_FILENAME)]
-    nchars = 0
-    for filepath in parquet_paths:
-        pf = pq.ParquetFile(filepath)
-        for rg_idx in range(pf.num_row_groups):
-            rg = pf.read_row_group(rg_idx)
-            for text in rg.column("text").to_pylist():
-                doc = text[:doc_cap] if len(text) > doc_cap else text
-                nchars += len(doc)
-                yield doc
-                if nchars >= max_chars:
-                    return
+    def token_bytes(self, token_id: int) -> bytes:
+        model = getattr(self.tok, "model", None)
+        if hasattr(model, "decode_single_token_bytes"):
+            try:
+                return model.decode_single_token_bytes(int(token_id))
+            except KeyError:
+                return f"<INVALID:{token_id}>".encode()
+        token = self.tok.convert_ids_to_tokens(int(token_id))
+        if token is None:
+            token = f"<INVALID:{token_id}>"
+        return str(token).encode("utf-8", errors="surrogatepass")
 
 
-def train_tokenizer():
-    """Train BPE tokenizer using rustbpe, save as tiktoken pickle."""
-    tokenizer_pkl = os.path.join(TOKENIZER_DIR, "tokenizer.pkl")
-    token_bytes_path = os.path.join(TOKENIZER_DIR, "token_bytes.pt")
+def build_tokenizer(name: str) -> TokenizerAdapter:
+    if name == "openai_o200k":
+        return OpenAITiktokenAdapter("o200k_base")
+    if name == "openai_cl100k":
+        return OpenAITiktokenAdapter("cl100k_base")
+    if name == "qwen3":
+        return HuggingFaceTokenizerAdapter("qwen3_0_6b", "qwen", "Qwen/Qwen3-0.6B")
+    if name == "kimi_k2":
+        return HuggingFaceTokenizerAdapter("kimi_k2_instruct", "kimi", "moonshotai/Kimi-K2-Instruct")
+    if name == "gemma4_31b":
+        return HuggingFaceTokenizerAdapter("gemma4_31b", "gemma", "google/gemma-4-31B")
+    if name == "deepseek_v4_pro":
+        return HuggingFaceTokenizerAdapter("deepseek_v4_pro", "deepseek", "deepseek-ai/DeepSeek-V4-Pro")
+    raise KeyError(f"unknown tokenizer: {name}")
 
-    if os.path.exists(tokenizer_pkl) and os.path.exists(token_bytes_path):
-        print(f"Tokenizer: already trained at {TOKENIZER_DIR}")
-        return
 
-    os.makedirs(TOKENIZER_DIR, exist_ok=True)
+def read_text_batches(path: Path, batch_chars: int = 1_000_000, batch_items: int = 8):
+    with path.open("r", encoding="utf-8", errors="ignore") as f:
+        batch: list[str] = []
+        while True:
+            chunk = f.read(batch_chars)
+            if not chunk:
+                break
+            batch.append(chunk)
+            if len(batch) >= batch_items:
+                yield batch
+                batch = []
+        if batch:
+            yield batch
 
-    parquet_files = list_parquet_files()
-    if len(parquet_files) < 2:
-        print("Tokenizer: need at least 2 data shards (1 train + 1 val). Download more data first.")
-        sys.exit(1)
 
-    # --- Train with rustbpe ---
-    print("Tokenizer: training BPE tokenizer...")
+def fineweb_text_path(kind: str, text_tokens: int = DEFAULT_TEXT_TOKENS) -> Path:
+    return TEXT_DIR / f"fineweb_{kind}_{text_tokens}.txt"
+
+
+def download_fineweb_text(kind: str, shard: str, target_tokens: int = DEFAULT_TEXT_TOKENS) -> Path:
+    os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+    out_path = fineweb_text_path(kind, target_tokens)
+    meta_path = out_path.with_suffix(".meta.json")
+    if out_path.exists() and meta_path.exists():
+        return out_path
+    HF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    TEXT_DIR.mkdir(parents=True, exist_ok=True)
+    parquet_path = hf_hub_download(
+        repo_id=FINEWEB_REPO,
+        repo_type="dataset",
+        filename=shard,
+        cache_dir=str(HF_CACHE_DIR),
+    )
+    rows = 0
+    tokens = 0
+    bytes_written = 0
+    with out_path.open("w", encoding="utf-8", errors="ignore") as out:
+        parquet = pq.ParquetFile(parquet_path)
+        for batch in parquet.iter_batches(batch_size=2048, columns=["text", "token_count", "language"]):
+            texts = batch.column("text").to_pylist()
+            token_counts = batch.column("token_count").to_pylist()
+            languages = batch.column("language").to_pylist()
+            for text, token_count, language in zip(texts, token_counts, languages):
+                if language and language != "en":
+                    continue
+                if not text:
+                    continue
+                out.write(text)
+                out.write("\n\n")
+                rows += 1
+                tokens += int(token_count or 0)
+                bytes_written += len(text.encode("utf-8", errors="ignore")) + 2
+                if tokens >= target_tokens:
+                    break
+            if tokens >= target_tokens:
+                break
+    meta = {
+        "repo": FINEWEB_REPO,
+        "shard": shard,
+        "parquet_path": parquet_path,
+        "rows": rows,
+        "dataset_token_count_sum": tokens,
+        "bytes_written": bytes_written,
+        "target_tokens": target_tokens,
+    }
+    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    return out_path
+
+
+def encode_text(adapter: TokenizerAdapter, text_path: Path, token_limit: int | None = None) -> np.ndarray:
+    chunks: list[np.ndarray] = []
+    total = 0
+    for batch in read_text_batches(text_path):
+        for ids in adapter.encode_batch(batch):
+            if not ids:
+                continue
+            if token_limit is not None:
+                need = token_limit - total
+                if need <= 0:
+                    break
+                ids = ids[:need]
+            arr = np.asarray(ids, dtype=np.uint32)
+            chunks.append(arr)
+            total += len(arr)
+        if token_limit is not None and total >= token_limit:
+            break
+    if not chunks:
+        return np.empty(0, dtype=np.uint32)
+    return np.concatenate(chunks)
+
+
+def reference_cache_path(adapter: TokenizerAdapter, ref_path: Path, token_limit: int) -> Path:
+    stat = ref_path.stat()
+    key = {
+        "cache_version": 1,
+        "tokenizer": adapter.spec.name,
+        "family": adapter.spec.family,
+        "vocab_size": adapter.spec.vocab_size,
+        "reference_path": str(ref_path.resolve()),
+        "reference_size": stat.st_size,
+        "reference_mtime_ns": stat.st_mtime_ns,
+        "token_limit": token_limit,
+    }
+    digest = hashlib.sha256(json.dumps(key, sort_keys=True).encode("utf-8")).hexdigest()[:24]
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", adapter.spec.name)
+    return REF_IDS_DIR / f"{safe_name}_{token_limit}_{digest}.npy"
+
+
+def encode_reference(adapter: TokenizerAdapter, ref_path: Path, token_limit: int) -> np.ndarray:
+    cache_path = reference_cache_path(adapter, ref_path, token_limit)
+    if cache_path.exists():
+        print(f"loading cached reference ids {cache_path}", flush=True)
+        return np.load(cache_path, mmap_mode="r")
+    REF_IDS_DIR.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
+    ids = encode_text(adapter, ref_path, token_limit)
+    tmp_path = cache_path.with_suffix(".tmp.npy")
+    np.save(tmp_path, ids)
+    tmp_path.replace(cache_path)
+    cache_path.with_suffix(".json").write_text(
+        json.dumps(
+            {
+                "tokenizer": adapter.spec.name,
+                "reference_text": str(ref_path),
+                "token_limit": token_limit,
+                "num_tokens": int(len(ids)),
+                "elapsed_seconds": time.time() - t0,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    print(f"wrote cached reference ids {cache_path} tokens={len(ids):,}", flush=True)
+    return np.load(cache_path, mmap_mode="r")
 
-    tokenizer = rustbpe.Tokenizer()
-    vocab_size_no_special = VOCAB_SIZE - len(SPECIAL_TOKENS)
-    tokenizer.train_from_iterator(text_iterator(), vocab_size_no_special, pattern=SPLIT_PATTERN)
 
-    # Build tiktoken encoding from trained merges
-    pattern = tokenizer.get_pattern()
-    mergeable_ranks = {bytes(k): v for k, v in tokenizer.get_mergeable_ranks()}
-    tokens_offset = len(mergeable_ranks)
-    special_tokens = {name: tokens_offset + i for i, name in enumerate(SPECIAL_TOKENS)}
-    enc = tiktoken.Encoding(
-        name="rustbpe",
-        pat_str=pattern,
-        mergeable_ranks=mergeable_ranks,
-        special_tokens=special_tokens,
+def fixture_paths(source_name: str, target_tokens: int, seed: int) -> dict[str, Path]:
+    stem = f"{source_name}_{target_tokens}_seed{seed}"
+    return {
+        "secret": FIXTURE_DIR / f"{stem}.secret_ids.npy",
+        "cipher": FIXTURE_DIR / f"{stem}.cipher_ids.npy",
+        "perm": FIXTURE_DIR / f"{stem}.perm.npy",
+        "meta": FIXTURE_DIR / f"{stem}.json",
+    }
+
+
+def make_fixture(
+    source_adapter: TokenizerAdapter,
+    target_text: Path,
+    target_tokens: int,
+    seed: int = DEFAULT_SEED,
+) -> dict[str, np.ndarray | Path]:
+    paths = fixture_paths(source_adapter.spec.name, target_tokens, seed)
+    if paths["secret"].exists() and paths["cipher"].exists() and paths["perm"].exists():
+        return {
+            "secret": np.load(paths["secret"], mmap_mode="r"),
+            "cipher": np.load(paths["cipher"], mmap_mode="r"),
+            "perm": np.load(paths["perm"], mmap_mode="r"),
+            **paths,
+        }
+    FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
+    t0 = time.time()
+    secret = encode_text(source_adapter, target_text, target_tokens)
+    rng = np.random.default_rng(seed)
+    perm = rng.permutation(source_adapter.spec.vocab_size).astype(np.uint32)
+    cipher = perm[secret]
+    np.save(paths["secret"], secret)
+    np.save(paths["cipher"], cipher)
+    np.save(paths["perm"], perm)
+    paths["meta"].write_text(
+        json.dumps(
+            {
+                "source_tokenizer": source_adapter.spec.name,
+                "source_vocab_size": source_adapter.spec.vocab_size,
+                "target_text": str(target_text),
+                "target_tokens_requested": target_tokens,
+                "target_tokens_observed": int(len(secret)),
+                "seed": seed,
+                "elapsed_seconds": time.time() - t0,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return {"secret": secret, "cipher": cipher, "perm": perm, **paths}
+
+
+class ByteNgramLM:
+    def __init__(self, order: int = 4, alpha: float = 0.05):
+        self.order = order
+        self.alpha = alpha
+        self.context_counts: list[dict[tuple[int, ...], int]] = [dict() for _ in range(order)]
+        self.next_counts: list[dict[tuple[int, ...], dict[int, int]]] = [dict() for _ in range(order)]
+
+    def train(self, data: bytes) -> None:
+        padded = bytes([0]) * (self.order - 1) + data
+        for pos in range(self.order - 1, len(padded)):
+            nxt = padded[pos]
+            for n in range(self.order):
+                ctx = tuple(padded[pos - n : pos]) if n else ()
+                self.context_counts[n][ctx] = self.context_counts[n].get(ctx, 0) + 1
+                bucket = self.next_counts[n].setdefault(ctx, {})
+                bucket[nxt] = bucket.get(nxt, 0) + 1
+
+    def bits_per_byte(self, data: bytes) -> float:
+        if not data:
+            return 99.0
+        padded = bytes([0]) * (self.order - 1) + data
+        bits = 0.0
+        for pos in range(self.order - 1, len(padded)):
+            nxt = padded[pos]
+            for n in range(self.order - 1, -1, -1):
+                ctx = tuple(padded[pos - n : pos]) if n else ()
+                total = self.context_counts[n].get(ctx, 0)
+                if total:
+                    count = self.next_counts[n].get(ctx, {}).get(nxt, 0)
+                    bits -= math.log2((count + self.alpha) / (total + self.alpha * 256))
+                    break
+            else:
+                bits += 8.0
+        return bits / len(data)
+
+
+def text_metrics(text: str, lm: ByteNgramLM) -> dict[str, float]:
+    data = text.encode("utf-8", errors="replace")
+    replacement = text.count("\ufffd") / max(1, len(text))
+    printable = sum(1 for ch in text if ch.isprintable() or ch in "\n\r\t") / max(1, len(text))
+    return {
+        "byte_lm_bpb": lm.bits_per_byte(data),
+        "replacement_rate": replacement,
+        "printable_rate": printable,
+    }
+
+
+def char_error_rate(original: str, recovered: str, max_chars: int = DEFAULT_EVAL_CHARS) -> float:
+    original = original[:max_chars]
+    recovered = recovered[:max_chars]
+    if not original:
+        return 1.0 if recovered else 0.0
+    return Levenshtein.distance(original, recovered) / len(original)
+
+
+@dataclass
+class Task:
+    source_adapter: TokenizerAdapter
+    target_adapter: TokenizerAdapter
+    target_text: Path
+    reference_text: Path
+    secret_ids: np.ndarray
+    cipher_ids: np.ndarray
+    perm: np.ndarray
+    ref_ids: np.ndarray
+    byte_lm: ByteNgramLM
+
+
+def load_task(
+    source_tokenizer: str,
+    target_tokenizer: str,
+    target_tokens: int = DEFAULT_TARGET_TOKENS,
+    reference_tokens: int = DEFAULT_REFERENCE_TOKENS,
+    seed: int = DEFAULT_SEED,
+    lm_bytes: int = 16_000_000,
+) -> Task:
+    target_text = download_fineweb_text("target", TARGET_SHARD, DEFAULT_TEXT_TOKENS)
+    reference_text = download_fineweb_text("reference", REFERENCE_SHARD, DEFAULT_TEXT_TOKENS)
+    source_adapter = build_tokenizer(source_tokenizer)
+    target_adapter = build_tokenizer(target_tokenizer)
+    fixture = make_fixture(source_adapter, target_text, target_tokens, seed)
+    ref_ids = encode_reference(target_adapter, reference_text, reference_tokens)
+    lm = ByteNgramLM(order=4)
+    lm.train(reference_text.read_bytes()[:lm_bytes])
+    return Task(
+        source_adapter=source_adapter,
+        target_adapter=target_adapter,
+        target_text=target_text,
+        reference_text=reference_text,
+        secret_ids=fixture["secret"],  # type: ignore[arg-type]
+        cipher_ids=fixture["cipher"],  # type: ignore[arg-type]
+        perm=fixture["perm"],  # type: ignore[arg-type]
+        ref_ids=ref_ids,
+        byte_lm=lm,
     )
 
-    # Save tokenizer
-    with open(tokenizer_pkl, "wb") as f:
-        pickle.dump(enc, f)
 
-    t1 = time.time()
-    print(f"Tokenizer: trained in {t1 - t0:.1f}s, saved to {tokenizer_pkl}")
-
-    # --- Build token_bytes lookup for BPB evaluation ---
-    print("Tokenizer: building token_bytes lookup...")
-    special_set = set(SPECIAL_TOKENS)
-    token_bytes_list = []
-    for token_id in range(enc.n_vocab):
-        token_str = enc.decode([token_id])
-        if token_str in special_set:
-            token_bytes_list.append(0)
-        else:
-            token_bytes_list.append(len(token_str.encode("utf-8")))
-    token_bytes_tensor = torch.tensor(token_bytes_list, dtype=torch.int32)
-    torch.save(token_bytes_tensor, token_bytes_path)
-    print(f"Tokenizer: saved token_bytes to {token_bytes_path}")
-
-    # Sanity check
-    test = "Hello world! Numbers: 123. Unicode: 你好"
-    encoded = enc.encode_ordinary(test)
-    decoded = enc.decode(encoded)
-    assert decoded == test, f"Tokenizer roundtrip failed: {test!r} -> {decoded!r}"
-    print(f"Tokenizer: sanity check passed (vocab_size={enc.n_vocab})")
-
-# ---------------------------------------------------------------------------
-# Runtime utilities (imported by train.py)
-# ---------------------------------------------------------------------------
-
-class Tokenizer:
-    """Minimal tokenizer wrapper. Training is handled above."""
-
-    def __init__(self, enc):
-        self.enc = enc
-        self.bos_token_id = enc.encode_single_token(BOS_TOKEN)
-
-    @classmethod
-    def from_directory(cls, tokenizer_dir=TOKENIZER_DIR):
-        with open(os.path.join(tokenizer_dir, "tokenizer.pkl"), "rb") as f:
-            enc = pickle.load(f)
-        return cls(enc)
-
-    def get_vocab_size(self):
-        return self.enc.n_vocab
-
-    def get_bos_token_id(self):
-        return self.bos_token_id
-
-    def encode(self, text, prepend=None, num_threads=8):
-        if prepend is not None:
-            prepend_id = prepend if isinstance(prepend, int) else self.enc.encode_single_token(prepend)
-        if isinstance(text, str):
-            ids = self.enc.encode_ordinary(text)
-            if prepend is not None:
-                ids.insert(0, prepend_id)
-        elif isinstance(text, list):
-            ids = self.enc.encode_ordinary_batch(text, num_threads=num_threads)
-            if prepend is not None:
-                for row in ids:
-                    row.insert(0, prepend_id)
-        else:
-            raise ValueError(f"Invalid input type: {type(text)}")
-        return ids
-
-    def decode(self, ids):
-        return self.enc.decode(ids)
+def evaluate_recovery(task: Task, recovered_text: str, sample_tokens: int = DEFAULT_SAMPLE_TOKENS) -> dict[str, float]:
+    original = task.source_adapter.decode(task.secret_ids[:sample_tokens].astype(int).tolist())
+    metrics = text_metrics(recovered_text, task.byte_lm)
+    metrics["cer50k"] = char_error_rate(original, recovered_text, DEFAULT_EVAL_CHARS)
+    return metrics
 
 
-def get_token_bytes(device="cpu"):
-    path = os.path.join(TOKENIZER_DIR, "token_bytes.pt")
-    with open(path, "rb") as f:
-        return torch.load(f, map_location=device)
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Prepare fixed detokenizer autoresearch fixtures")
+    parser.add_argument("--source-tokenizer", default=os.environ.get("DETOK_SOURCE", "kimi_k2"))
+    parser.add_argument("--target-tokenizer", default=os.environ.get("DETOK_TARGET", "openai_o200k"))
+    parser.add_argument("--target-tokens", type=int, default=int(os.environ.get("DETOK_TARGET_TOKENS", DEFAULT_TARGET_TOKENS)))
+    parser.add_argument("--reference-tokens", type=int, default=int(os.environ.get("DETOK_REFERENCE_TOKENS", DEFAULT_REFERENCE_TOKENS)))
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    args = parser.parse_args()
+    task = load_task(
+        args.source_tokenizer,
+        args.target_tokenizer,
+        target_tokens=args.target_tokens,
+        reference_tokens=args.reference_tokens,
+        seed=args.seed,
+    )
+    print("ready")
+    print(f"source_tokenizer:   {task.source_adapter.spec.name}")
+    print(f"target_tokenizer:   {task.target_adapter.spec.name}")
+    print(f"cipher_tokens:      {len(task.cipher_ids):,}")
+    print(f"reference_tokens:   {len(task.ref_ids):,}")
+    print(f"cache_dir:          {CACHE_DIR}")
 
-
-def _document_batches(split, tokenizer_batch_size=128):
-    """Infinite iterator over document batches from parquet files."""
-    parquet_paths = list_parquet_files()
-    assert len(parquet_paths) > 0, "No parquet files found. Run prepare.py first."
-    val_path = os.path.join(DATA_DIR, VAL_FILENAME)
-    if split == "train":
-        parquet_paths = [p for p in parquet_paths if p != val_path]
-        assert len(parquet_paths) > 0, "No training shards found."
-    else:
-        parquet_paths = [val_path]
-    epoch = 1
-    while True:
-        for filepath in parquet_paths:
-            pf = pq.ParquetFile(filepath)
-            for rg_idx in range(pf.num_row_groups):
-                rg = pf.read_row_group(rg_idx)
-                batch = rg.column('text').to_pylist()
-                for i in range(0, len(batch), tokenizer_batch_size):
-                    yield batch[i:i+tokenizer_batch_size], epoch
-        epoch += 1
-
-
-def make_dataloader(tokenizer, B, T, split, buffer_size=1000):
-    """
-    BOS-aligned dataloader with best-fit packing.
-    Every row starts with BOS. Documents packed using best-fit to minimize cropping.
-    When no document fits remaining space, crops shortest doc to fill exactly.
-    100% utilization (no padding).
-    """
-    assert split in ["train", "val"]
-    row_capacity = T + 1
-    batches = _document_batches(split)
-    bos_token = tokenizer.get_bos_token_id()
-    doc_buffer = []
-    epoch = 1
-
-    def refill_buffer():
-        nonlocal epoch
-        doc_batch, epoch = next(batches)
-        token_lists = tokenizer.encode(doc_batch, prepend=bos_token)
-        doc_buffer.extend(token_lists)
-
-    # Pre-allocate buffers: [inputs (B*T) | targets (B*T)]
-    row_buffer = torch.empty((B, row_capacity), dtype=torch.long)
-    cpu_buffer = torch.empty(2 * B * T, dtype=torch.long, pin_memory=True)
-    gpu_buffer = torch.empty(2 * B * T, dtype=torch.long, device="cuda")
-    cpu_inputs = cpu_buffer[:B * T].view(B, T)
-    cpu_targets = cpu_buffer[B * T:].view(B, T)
-    inputs = gpu_buffer[:B * T].view(B, T)
-    targets = gpu_buffer[B * T:].view(B, T)
-
-    while True:
-        for row_idx in range(B):
-            pos = 0
-            while pos < row_capacity:
-                while len(doc_buffer) < buffer_size:
-                    refill_buffer()
-
-                remaining = row_capacity - pos
-
-                # Find largest doc that fits entirely
-                best_idx = -1
-                best_len = 0
-                for i, doc in enumerate(doc_buffer):
-                    doc_len = len(doc)
-                    if doc_len <= remaining and doc_len > best_len:
-                        best_idx = i
-                        best_len = doc_len
-
-                if best_idx >= 0:
-                    doc = doc_buffer.pop(best_idx)
-                    row_buffer[row_idx, pos:pos + len(doc)] = torch.tensor(doc, dtype=torch.long)
-                    pos += len(doc)
-                else:
-                    # No doc fits — crop shortest to fill remaining
-                    shortest_idx = min(range(len(doc_buffer)), key=lambda i: len(doc_buffer[i]))
-                    doc = doc_buffer.pop(shortest_idx)
-                    row_buffer[row_idx, pos:pos + remaining] = torch.tensor(doc[:remaining], dtype=torch.long)
-                    pos += remaining
-
-        cpu_inputs.copy_(row_buffer[:, :-1])
-        cpu_targets.copy_(row_buffer[:, 1:])
-        gpu_buffer.copy_(cpu_buffer, non_blocking=True)
-        yield inputs, targets, epoch
-
-# ---------------------------------------------------------------------------
-# Evaluation (DO NOT CHANGE — this is the fixed metric)
-# ---------------------------------------------------------------------------
-
-@torch.no_grad()
-def evaluate_bpb(model, tokenizer, batch_size):
-    """
-    Bits per byte (BPB): vocab size-independent evaluation metric.
-    Sums per-token cross-entropy (in nats), sums target byte lengths,
-    then converts nats/byte to bits/byte. Special tokens (byte length 0)
-    are excluded from both sums.
-    Uses fixed MAX_SEQ_LEN so results are comparable across configs.
-    """
-    token_bytes = get_token_bytes(device="cuda")
-    val_loader = make_dataloader(tokenizer, batch_size, MAX_SEQ_LEN, "val")
-    steps = EVAL_TOKENS // (batch_size * MAX_SEQ_LEN)
-    total_nats = 0.0
-    total_bytes = 0
-    for _ in range(steps):
-        x, y, _ = next(val_loader)
-        loss_flat = model(x, y, reduction='none').view(-1)
-        y_flat = y.view(-1)
-        nbytes = token_bytes[y_flat]
-        mask = nbytes > 0
-        total_nats += (loss_flat * mask).sum().item()
-        total_bytes += nbytes.sum().item()
-    return total_nats / (math.log(2) * total_bytes)
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Prepare data and tokenizer for autoresearch")
-    parser.add_argument("--num-shards", type=int, default=10, help="Number of training shards to download (-1 = all). Val shard is always pinned.")
-    parser.add_argument("--download-workers", type=int, default=8, help="Number of parallel download workers")
-    args = parser.parse_args()
-
-    num_shards = MAX_SHARD if args.num_shards == -1 else args.num_shards
-
-    print(f"Cache directory: {CACHE_DIR}")
-    print()
-
-    # Step 1: Download data
-    download_data(num_shards, download_workers=args.download_workers)
-    print()
-
-    # Step 2: Train tokenizer
-    train_tokenizer()
-    print()
-    print("Done! Ready to train.")
+    main()
