@@ -328,7 +328,7 @@ def make_fixture(
             "secret": np.load(paths["secret"], mmap_mode="r"),
             "cipher": np.load(paths["cipher"], mmap_mode="r"),
             "perm": np.load(paths["perm"], mmap_mode="r"),
-            **paths,
+            "meta_path": paths["meta"],
         }
     FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
@@ -354,7 +354,7 @@ def make_fixture(
         ),
         encoding="utf-8",
     )
-    return {"secret": secret, "cipher": cipher, "perm": perm, **paths}
+    return {"secret": secret, "cipher": cipher, "perm": perm, "meta_path": paths["meta"]}
 
 
 class ByteNgramLM:
