@@ -12,7 +12,9 @@ dependencies = [
     "rapidfuzz>=3.14.0",
     "tiktoken>=0.12.0",
     "tokenizers>=0.22.0",
-    "torch>=2.0.0",
+    # Keep below CUDA-13 wheels because the remote H100/H200 pod currently has
+    # a CUDA 12.4-era NVIDIA driver.
+    "torch>=2.0.0,<2.7",
     "transformers>=4.57.0",
 ]
 
