@@ -95,6 +95,19 @@ VARIABLE_EMISSION_MIN_COUNT = 10
 VARIABLE_EMISSION_MIN_GAIN_PER_OCC = 5.00
 VARIABLE_EMISSION_MAX_ACCEPTED = 2
 VARIABLE_EMISSION_FREE_LOCAL_PAIRS = True
+STRING_LEXICON_REPAIR = True
+STRING_LEXICON_MAX_TOKENS = 100_000
+STRING_LEXICON_NODES = 512
+STRING_LEXICON_BIGRAMS = 8_192
+STRING_LEXICON_MIN_PAIR_COUNT = 4
+STRING_LEXICON_MIN_PAIR_COVERAGE = 0.35
+STRING_LEXICON_MAX_COMBO_CHARS = 32
+STRING_LEXICON_MAX_SHIFT = 4
+STRING_LEXICON_CONTEXT_RADIUS = 3
+STRING_LEXICON_MAX_CONTEXTS = 768
+STRING_LEXICON_MIN_GAIN_PER_BYTE = 0.015
+STRING_LEXICON_MAX_ACCEPTED = 4
+STRING_LEXICON_ALLOW_EMPTY_SPLITS = True
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -1126,6 +1139,214 @@ def variable_emission_repair(
     return emissions
 
 
+def classify_piece(piece: str) -> str:
+    if piece == "":
+        return "empty"
+    if "\ufffd" in piece:
+        return "replacement"
+    if piece in ("\n", "\r\n") or (piece and set(piece) <= {"\n", "\r"}):
+        return "newline"
+    if piece.isspace():
+        return "whitespace"
+    stripped = piece.strip()
+    if stripped and all(not ch.isalnum() and not ch.isspace() for ch in stripped):
+        return "punctuation"
+    if stripped and stripped.isalnum():
+        return "alnum"
+    return "mixed"
+
+
+def lm_total_bits(byte_lm, text: str) -> tuple[float, int]:
+    data = text.encode("utf-8", errors="replace")
+    if not data:
+        return 0.0, 0
+    return float(byte_lm.bits_per_byte(data) * len(data)), len(data)
+
+
+def piece_for_cipher(
+    cipher_id: int,
+    mapping: np.ndarray,
+    emissions: dict[int, tuple[int, ...]],
+    target_adapter,
+    cache: dict[int, str],
+) -> str:
+    cached = cache.get(cipher_id)
+    if cached is not None:
+        return cached
+    emission = emissions.get(cipher_id)
+    if emission is None:
+        piece = target_adapter.decode([int(mapping[cipher_id])])
+    else:
+        piece = target_adapter.decode([int(p) for p in emission])
+    cache[cipher_id] = piece
+    return piece
+
+
+def string_lexicon_repair(
+    cipher_ids: np.ndarray,
+    mapping: np.ndarray,
+    emissions: dict[int, tuple[int, ...]],
+    target_adapter,
+    byte_lm,
+) -> dict[int, str]:
+    """Infer a tiny cipher-id -> string-piece override lexicon.
+
+    This is intentionally conservative: it only tries split/boundary moves for
+    frequent adjacent cipher-token pairs and scores the resulting global
+    string-piece assignments on local byte-LM windows around all occurrences of
+    the touched token types. The source tokenizer is not used.
+    """
+
+    if not STRING_LEXICON_REPAIR or len(cipher_ids) > STRING_LEXICON_MAX_TOKENS:
+        return {}
+
+    vocab_floor = int(max(len(mapping), int(cipher_ids.max(initial=0)) + 1))
+    c_counts = counts(cipher_ids, vocab_floor)
+    c_order = np.argsort(-c_counts)
+    c_nodes = c_order[: min(STRING_LEXICON_NODES, np.count_nonzero(c_counts))].astype(np.int64)
+    if len(c_nodes) < 64:
+        return {}
+
+    node_pos = {int(c): i for i, c in enumerate(c_nodes)}
+    positions_by_c: dict[int, list[int]] = {int(c): [] for c in c_nodes}
+    max_positions = max(STRING_LEXICON_MAX_CONTEXTS, 32)
+    for pos, c in enumerate(cipher_ids):
+        c_int = int(c)
+        bucket = positions_by_c.get(c_int)
+        if bucket is not None and len(bucket) < max_positions:
+            bucket.append(pos)
+
+    c_big = dense_bigram_counts(cipher_ids, c_nodes, vocab_floor)
+    pair_rows, pair_cols = np.nonzero(c_big >= STRING_LEXICON_MIN_PAIR_COUNT)
+    if len(pair_rows) == 0:
+        return {}
+    pair_counts = c_big[pair_rows, pair_cols]
+    order = np.argsort(-pair_counts)[:STRING_LEXICON_BIGRAMS]
+    piece_cache: dict[int, str] = {}
+    proposals: list[tuple[float, int, int, str, str, str, str, int, float]] = []
+
+    def render_window(start: int, stop: int, overrides: dict[int, str]) -> str:
+        parts: list[str] = []
+        for tok in cipher_ids[start:stop]:
+            tok_int = int(tok)
+            override = overrides.get(tok_int)
+            if override is not None:
+                parts.append(override)
+            else:
+                parts.append(piece_for_cipher(tok_int, mapping, emissions, target_adapter, piece_cache))
+        return "".join(parts)
+
+    def score_pair_overrides(a: int, b: int, cand_a: str, cand_b: str) -> tuple[float, int]:
+        base_overrides: dict[int, str] = {}
+        cand_overrides = {a: cand_a, b: cand_b}
+        windows: set[tuple[int, int]] = set()
+        for token in (a, b):
+            for pos in positions_by_c.get(token, []):
+                start = max(0, pos - STRING_LEXICON_CONTEXT_RADIUS)
+                stop = min(len(cipher_ids), pos + STRING_LEXICON_CONTEXT_RADIUS + 1)
+                windows.add((start, stop))
+        old_bits = 0.0
+        new_bits = 0.0
+        total_bytes = 0
+        for start, stop in windows:
+            old_text = render_window(start, stop, base_overrides)
+            new_text = render_window(start, stop, cand_overrides)
+            old_chunk_bits, _ = lm_total_bits(byte_lm, old_text)
+            new_chunk_bits, chunk_bytes = lm_total_bits(byte_lm, new_text)
+            old_bits += old_chunk_bits
+            new_bits += new_chunk_bits
+            total_bytes += chunk_bytes
+        return old_bits - new_bits, total_bytes
+
+    for idx in order:
+        row = int(pair_rows[int(idx)])
+        col = int(pair_cols[int(idx)])
+        if row == col:
+            continue
+        a = int(c_nodes[row])
+        b = int(c_nodes[col])
+        pair_count = int(c_big[row, col])
+        min_count = max(1, min(int(c_counts[a]), int(c_counts[b])))
+        coverage = pair_count / min_count
+        if coverage < STRING_LEXICON_MIN_PAIR_COVERAGE:
+            continue
+        left_piece = piece_for_cipher(a, mapping, emissions, target_adapter, piece_cache)
+        right_piece = piece_for_cipher(b, mapping, emissions, target_adapter, piece_cache)
+        if "\ufffd" in left_piece or "\ufffd" in right_piece:
+            continue
+        combo = left_piece + right_piece
+        if len(combo) > STRING_LEXICON_MAX_COMBO_CHARS or len(combo) < 2:
+            continue
+        boundary = len(left_piece)
+        split_points: set[int] = set(range(max(1, boundary - STRING_LEXICON_MAX_SHIFT), min(len(combo), boundary + STRING_LEXICON_MAX_SHIFT) + 1))
+        for split in range(1, len(combo)):
+            prev_ch = combo[split - 1]
+            next_ch = combo[split] if split < len(combo) else ""
+            if prev_ch.isspace() or next_ch.isspace() or prev_ch in "'\".,:;!?)]}" or next_ch in "'\"([{" :
+                split_points.add(split)
+        if STRING_LEXICON_ALLOW_EMPTY_SPLITS and coverage >= 0.75:
+            split_points.update((0, len(combo)))
+        for split in sorted(split_points):
+            if split == boundary:
+                continue
+            if not STRING_LEXICON_ALLOW_EMPTY_SPLITS and (split == 0 or split == len(combo)):
+                continue
+            cand_left = combo[:split]
+            cand_right = combo[split:]
+            if cand_left == left_piece and cand_right == right_piece:
+                continue
+            gain, scored_bytes = score_pair_overrides(a, b, cand_left, cand_right)
+            if scored_bytes <= 0:
+                continue
+            gain_per_byte = gain / scored_bytes
+            if gain_per_byte >= STRING_LEXICON_MIN_GAIN_PER_BYTE:
+                proposals.append(
+                    (
+                        gain_per_byte,
+                        a,
+                        b,
+                        cand_left,
+                        cand_right,
+                        left_piece,
+                        right_piece,
+                        pair_count,
+                        coverage,
+                    )
+                )
+
+    proposals.sort(reverse=True)
+    overrides: dict[int, str] = {}
+    used: set[int] = set()
+    accepted = 0
+    for gain, a, b, cand_left, cand_right, _, _, _, _ in proposals:
+        if a in used or b in used:
+            continue
+        overrides[a] = cand_left
+        overrides[b] = cand_right
+        used.update((a, b))
+        accepted += 1
+        if accepted >= STRING_LEXICON_MAX_ACCEPTED:
+            break
+
+    print(
+        f"string_lexicon_nodes={len(c_nodes)} pair_candidates={len(order)} proposals={len(proposals)} accepted_pairs={accepted}",
+        flush=True,
+    )
+    if proposals:
+        gains = np.asarray([p[0] for p in proposals], dtype=np.float32)
+        print(f"string_lexicon_gain_per_byte_median={float(np.median(gains)):.6f}", flush=True)
+        print(f"string_lexicon_gain_per_byte_p90={float(np.percentile(gains, 90)):.6f}", flush=True)
+    if overrides:
+        classes: dict[str, int] = {}
+        empty = 0
+        for piece in overrides.values():
+            label = classify_piece(piece)
+            classes[label] = classes.get(label, 0) + 1
+            empty += int(piece == "")
+        print(f"string_lexicon_classes={json.dumps(classes, sort_keys=True)} empty={empty}", flush=True)
+    return overrides
+
+
 def decode_with_variable_emissions(
     cipher_ids: np.ndarray,
     mapping: np.ndarray,
@@ -1145,6 +1366,27 @@ def decode_with_variable_emissions(
     return target_adapter.decode(out)
 
 
+def decode_with_string_lexicon(
+    cipher_ids: np.ndarray,
+    mapping: np.ndarray,
+    emissions: dict[int, tuple[int, ...]],
+    string_overrides: dict[int, str],
+    target_adapter,
+) -> str:
+    if not string_overrides:
+        return decode_with_variable_emissions(cipher_ids, mapping, emissions, target_adapter)
+    cache: dict[int, str] = {}
+    parts: list[str] = []
+    for c in cipher_ids:
+        c_int = int(c)
+        override = string_overrides.get(c_int)
+        if override is not None:
+            parts.append(override)
+        else:
+            parts.append(piece_for_cipher(c_int, mapping, emissions, target_adapter, cache))
+    return "".join(parts)
+
+
 def main() -> None:
     t0 = time.time()
     task = load_task(
@@ -1161,10 +1403,18 @@ def main() -> None:
 
     mapping = align_shuffled(task.cipher_ids, task.ref_ids, task.target_adapter.spec.vocab_size)
     emissions = variable_emission_repair(task.cipher_ids, task.ref_ids, mapping, task.target_adapter.spec.vocab_size)
-    recovered_sample = decode_with_variable_emissions(
+    string_overrides = string_lexicon_repair(
+        task.cipher_ids,
+        mapping,
+        emissions,
+        task.target_adapter,
+        task.byte_lm,
+    )
+    recovered_sample = decode_with_string_lexicon(
         task.cipher_ids[:SAMPLE_TOKENS],
         mapping,
         emissions,
+        string_overrides,
         task.target_adapter,
     )
     metrics = evaluate_recovery(task, recovered_sample, SAMPLE_TOKENS)
@@ -1197,6 +1447,12 @@ def main() -> None:
         "learn_skip_weight": LEARN_SKIP_WEIGHT,
         "variable_emission_repair": VARIABLE_EMISSION_REPAIR,
         "variable_emissions": len(emissions),
+        "string_lexicon_repair": STRING_LEXICON_REPAIR,
+        "string_lexicon_overrides": len(string_overrides),
+        "string_lexicon_classes": {
+            label: sum(1 for piece in string_overrides.values() if classify_piece(piece) == label)
+            for label in sorted({classify_piece(piece) for piece in string_overrides.values()})
+        },
         "diagnostics": diagnostics,
         "elapsed_seconds": time.time() - t0,
         "metrics": metrics,
