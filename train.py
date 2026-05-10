@@ -52,6 +52,7 @@ LEARN_WEIGHT_SEEDS = 512
 LEARN_WEIGHT_STEPS = 12
 LEARN_WEIGHT_LR = 0.2
 LEARN_WEIGHT_TEMP = 0.07
+DYNAMIC_ANCHOR_MAX_TOKENS = 100_000
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -220,8 +221,10 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
     candidate_window = effective_candidate_window(len(cipher_ids))
     rounds = effective_rounds(len(cipher_ids))
     use_skip_context = len(cipher_ids) >= SKIP_CONTEXT_MIN_TOKENS
+    use_dynamic_anchors = len(cipher_ids) <= DYNAMIC_ANCHOR_MAX_TOKENS
     print(f"candidate_window: {candidate_window}", flush=True)
     print(f"skip_context: {use_skip_context}", flush=True)
+    print(f"dynamic_anchors: {use_dynamic_anchors}", flush=True)
     c_counts = counts(cipher_ids, int(max(target_vocab_size, int(cipher_ids.max()) + 1)))
     p_counts = counts(ref_ids, target_vocab_size)
     c_order_all = np.argsort(-c_counts)
@@ -309,7 +312,7 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
             used_p.add(p)
             assigned_scores.append((score, c))
         mapping = next_mapping
-        if len(assigned_scores) >= 64:
+        if use_dynamic_anchors and len(assigned_scores) >= 64:
             assigned_scores.sort(reverse=True)
             next_anchor_rows: list[int] = []
             seen_rows: set[int] = set()
@@ -363,6 +366,7 @@ def main() -> None:
         "freq_weight": FREQ_WEIGHT,
         "torch_topk": TORCH_TOPK,
         "skip_context": len(task.cipher_ids) >= SKIP_CONTEXT_MIN_TOKENS,
+        "dynamic_anchors": len(task.cipher_ids) <= DYNAMIC_ANCHOR_MAX_TOKENS,
         "skip_context_weight": SKIP_CONTEXT_WEIGHT,
         "learn_skip_weight": LEARN_SKIP_WEIGHT,
         "elapsed_seconds": time.time() - t0,
