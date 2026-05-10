@@ -52,6 +52,7 @@ LEARN_WEIGHT_SEEDS = 512
 LEARN_WEIGHT_STEPS = 12
 LEARN_WEIGHT_LR = 0.2
 LEARN_WEIGHT_TEMP = 0.07
+LEARN_FREQ_WEIGHT = True
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -120,7 +121,7 @@ def normalize_features(x, token_counts: np.ndarray, device: str):
     return x
 
 
-def learn_skip_weight(
+def learn_score_weights(
     c_left,
     c_right,
     c_left2,
@@ -129,10 +130,13 @@ def learn_skip_weight(
     p_right,
     p_left2,
     p_right2,
+    c_anchors: np.ndarray,
     p_focus: np.ndarray,
     p_anchors: np.ndarray,
+    c_log: np.ndarray,
+    p_log: np.ndarray,
     device: str,
-) -> float:
+) -> tuple[float, float]:
     p_positions = {int(token_id): row for row, token_id in enumerate(p_focus)}
     c_rows: list[int] = []
     p_rows: list[int] = []
@@ -145,35 +149,47 @@ def learn_skip_weight(
         if len(c_rows) >= LEARN_WEIGHT_SEEDS:
             break
     if len(c_rows) < 64:
-        return SKIP_CONTEXT_WEIGHT
+        return SKIP_CONTEXT_WEIGHT, FREQ_WEIGHT
 
     c_idx = torch.as_tensor(c_rows, dtype=torch.long, device=device)
     p_idx = torch.as_tensor(p_rows, dtype=torch.long, device=device)
+    c_seed_ids = np.asarray([int(c_anchors[row]) for row in c_rows], dtype=np.int64)
+    p_seed_ids = np.asarray([int(p_focus[row]) for row in p_rows], dtype=np.int64)
+    c_log_t = torch.as_tensor(c_log[c_seed_ids].astype(np.float32), dtype=torch.float32, device=device)
+    p_log_t = torch.as_tensor(p_log[p_seed_ids].astype(np.float32), dtype=torch.float32, device=device)
+    freq_delta = torch.abs(c_log_t[:, None] - p_log_t[None, :])
     with torch.enable_grad():
         c_base = torch.cat([c_left[c_idx], c_right[c_idx]], dim=1).detach()
         p_base = torch.cat([p_left[p_idx], p_right[p_idx]], dim=1).detach()
         c_skip = torch.cat([c_left2[c_idx], c_right2[c_idx]], dim=1).detach()
         p_skip = torch.cat([p_left2[p_idx], p_right2[p_idx]], dim=1).detach()
-        raw_weight = torch.tensor(0.54132485, dtype=torch.float32, device=device, requires_grad=True)
-        optimizer = torch.optim.Adam([raw_weight], lr=LEARN_WEIGHT_LR)
+        raw_weights = torch.tensor(
+            [0.54132485, float(np.log(np.expm1(FREQ_WEIGHT)))],
+            dtype=torch.float32,
+            device=device,
+            requires_grad=True,
+        )
+        optimizer = torch.optim.Adam([raw_weights], lr=LEARN_WEIGHT_LR)
         target = torch.arange(len(c_rows), dtype=torch.long, device=device)
         for _ in range(LEARN_WEIGHT_STEPS):
             optimizer.zero_grad(set_to_none=True)
-            weight = torch.nn.functional.softplus(raw_weight).clamp(0.05, 4.0)
-            c_vec = torch.cat([c_base, c_skip * weight], dim=1)
-            p_vec = torch.cat([p_base, p_skip * weight], dim=1)
+            skip_weight = torch.nn.functional.softplus(raw_weights[0]).clamp(0.05, 4.0)
+            freq_weight = torch.nn.functional.softplus(raw_weights[1]).clamp(0.0, 1.0)
+            c_vec = torch.cat([c_base, c_skip * skip_weight], dim=1)
+            p_vec = torch.cat([p_base, p_skip * skip_weight], dim=1)
             c_vec = c_vec / torch.linalg.vector_norm(c_vec, dim=1, keepdim=True).clamp_min(1e-12)
             p_vec = p_vec / torch.linalg.vector_norm(p_vec, dim=1, keepdim=True).clamp_min(1e-12)
-            logits = (c_vec @ p_vec.T) / LEARN_WEIGHT_TEMP
+            logits = (c_vec @ p_vec.T - freq_weight * freq_delta) / LEARN_WEIGHT_TEMP
             loss = 0.5 * (
                 torch.nn.functional.cross_entropy(logits, target)
                 + torch.nn.functional.cross_entropy(logits.T, target)
             )
             loss.backward()
             optimizer.step()
-        learned = float(torch.nn.functional.softplus(raw_weight).clamp(0.05, 4.0).detach().cpu())
-        del c_base, p_base, c_skip, p_skip, c_vec, p_vec, logits, loss
-    return learned
+        learned_skip = float(torch.nn.functional.softplus(raw_weights[0]).clamp(0.05, 4.0).detach().cpu())
+        learned_freq = float(torch.nn.functional.softplus(raw_weights[1]).clamp(0.0, 1.0).detach().cpu())
+        del c_base, p_base, c_skip, p_skip, c_vec, p_vec, logits, loss, freq_delta, c_log_t, p_log_t
+    return learned_skip, learned_freq
 
 
 def topk_edges(
@@ -186,6 +202,7 @@ def topk_edges(
     mapping: np.ndarray,
     p_rank: np.ndarray,
     candidate_window: int,
+    freq_weight: float,
     device: str,
 ) -> list[tuple[float, int, int]]:
     p_log_t = torch.as_tensor(p_log[p_focus].astype(np.float32), dtype=torch.float32, device=device)
@@ -197,7 +214,7 @@ def topk_edges(
         c_ids = c_focus[start:stop]
         sim = c_vec[start:stop] @ p_vec.T
         c_log_t = torch.as_tensor(c_log[c_ids].astype(np.float32), dtype=torch.float32, device=device)
-        sim -= FREQ_WEIGHT * torch.abs(c_log_t[:, None] - p_log_t[None, :])
+        sim -= freq_weight * torch.abs(c_log_t[:, None] - p_log_t[None, :])
         if candidate_window > 0:
             centers = torch.as_tensor(p_rank[mapping[c_ids]].astype(np.int64), dtype=torch.long, device=device)
             mask = torch.abs(p_rank_t[None, :] - centers[:, None]) <= candidate_window
@@ -246,12 +263,13 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
             p_left, p_right = torch_context_maps(ref_ids, p_focus, p_anchors, device)
             c_parts = [c_left, c_right]
             p_parts = [p_left, p_right]
+            round_freq_weight = FREQ_WEIGHT
             if use_skip_context:
                 c_left2, c_right2 = torch_context_maps(cipher_ids, c_focus, c_anchors, device, offset=2)
                 p_left2, p_right2 = torch_context_maps(ref_ids, p_focus, p_anchors, device, offset=2)
                 skip_weight = SKIP_CONTEXT_WEIGHT
                 if LEARN_SKIP_WEIGHT:
-                    skip_weight = learn_skip_weight(
+                    skip_weight, learned_freq_weight = learn_score_weights(
                         c_left,
                         c_right,
                         c_left2,
@@ -260,11 +278,19 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
                         p_right,
                         p_left2,
                         p_right2,
+                        c_anchors,
                         p_focus,
                         p_anchors,
+                        c_log,
+                        p_log,
                         device,
                     )
-                    print(f"learned_skip_weight: {skip_weight:.4f}", flush=True)
+                    if LEARN_FREQ_WEIGHT:
+                        round_freq_weight = learned_freq_weight
+                    print(
+                        f"learned_skip_weight: {skip_weight:.4f} learned_freq_weight: {round_freq_weight:.4f}",
+                        flush=True,
+                    )
                 c_left2.mul_(skip_weight)
                 c_right2.mul_(skip_weight)
                 p_left2.mul_(skip_weight)
@@ -286,6 +312,7 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
                 mapping,
                 p_rank,
                 candidate_window,
+                round_freq_weight,
                 device,
             )
             del c_vec, p_vec
@@ -340,6 +367,7 @@ def main() -> None:
         "candidate_window": effective_candidate_window(len(task.cipher_ids)),
         "rounds": effective_rounds(len(task.cipher_ids)),
         "freq_weight": FREQ_WEIGHT,
+        "learn_freq_weight": LEARN_FREQ_WEIGHT,
         "torch_topk": TORCH_TOPK,
         "skip_context": len(task.cipher_ids) >= SKIP_CONTEXT_MIN_TOKENS,
         "skip_context_weight": SKIP_CONTEXT_WEIGHT,
