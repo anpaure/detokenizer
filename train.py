@@ -1,34 +1,33 @@
-"""Mutable detokenizer experiment.
+"""Graphless segmental transducer experiment.
 
-This file is the hillclimb target. The baseline implements the current
-frequency + bigram-context graph aligner for a shuffled token-ID stream. Agents
-should modify this file only, run `uv run train.py`, and keep changes that lower
-cer50k.
+This branch intentionally removes the graph aligner. The decoder starts from a
+frequency-rank lexicon, then lets a byte-level segmental transducer rewrite
+short high-loss islands with span-1/span-2 byte-string emissions.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 import time
+from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-import torch
 
 from prepare import (
+    CACHE_DIR,
     DEFAULT_REFERENCE_TOKENS,
     DEFAULT_SAMPLE_TOKENS,
     DEFAULT_SEED,
     DEFAULT_TARGET_TOKENS,
-    CACHE_DIR,
     evaluate_recovery,
     load_task,
 )
 
-# ---------------------------------------------------------------------------
-# Experiment knobs. Agents may edit these directly.
-# ---------------------------------------------------------------------------
 
 SOURCE_TOKENIZER = os.environ.get("DETOK_SOURCE", "kimi_k2")
 TARGET_TOKENIZER = os.environ.get("DETOK_TARGET", "openai_o200k")
@@ -37,509 +36,365 @@ REFERENCE_TOKENS = int(os.environ.get("DETOK_REFERENCE_TOKENS", DEFAULT_REFERENC
 SAMPLE_TOKENS = int(os.environ.get("DETOK_SAMPLE_TOKENS", DEFAULT_SAMPLE_TOKENS))
 SEED = int(os.environ.get("DETOK_SEED", DEFAULT_SEED))
 
-TOP_TOKENS = 50_000
-ANCHORS = 8_192
-CANDIDATE_WINDOW = 10_000
-ROUNDS = 6
-FREQ_WEIGHT = 0.12
-TORCH_TOPK = 64
-TORCH_BATCH_SIZE = 256
-TORCH_CONTEXT_CHUNK = 5_000_000
-SKIP_CONTEXT_MIN_TOKENS = 100_000
-SKIP_CONTEXT_WEIGHT = 1.0
-LEARN_SKIP_WEIGHT = True
-LEARN_WEIGHT_SEEDS = 512
-LEARN_WEIGHT_STEPS = 12
-LEARN_WEIGHT_LR = 0.2
-LEARN_WEIGHT_TEMP = 0.07
-DYNAMIC_ANCHOR_MAX_TOKENS = 100_000
-ENABLE_DYNAMIC_ASSIGNMENT_SWAPS = True
-ASSIGNMENT_SWAP_MIN_GAIN = 0.01
-BIGRAM_OBJECTIVE_REFINE = True
-BIGRAM_REFINE_ALL_SCALES = True
-BIGRAM_REFINE_TOKENS = 2_048
-BIGRAM_REFINE_LARGE_TOKENS = 8_192
-BIGRAM_REFINE_LARGE_TOKEN_MIN_TOKENS = 1_000_000
-BIGRAM_REFINE_LARGE_TOKEN_MAX_TOKENS = 1_000_000
-BIGRAM_REFINE_MAX_PROPOSALS = 100_000
-BIGRAM_REFINE_PASSES = 4
-BIGRAM_REFINE_LARGE_PASSES = 3
-BIGRAM_REFINE_SKIP_WEIGHT = 0.4
-BIGRAM_REFINE_SKIP_MIN_TOKENS = 1_000_000
-BIGRAM_REFINE_SKIP_MAX_TOKENS = 1_000_000
-BIGRAM_REFINE_ALPHA = 0.05
-BIGRAM_UNIGRAM_BACKOFF = True
-BIGRAM_UNIGRAM_BACKOFF_TAU = 1000.0
-BIGRAM_UNIGRAM_BACKOFF_MAX_TOKENS = 100_000
+FOCUS_TYPES = 50_000
+RANK_WINDOW = 4_096
+SINGLE_CANDIDATES = 12
+PAIR_CANDIDATES = 16
+REFERENCE_SPAN_BYTES = 2_000_000
+REFERENCE_SPANS_PER_BUCKET = 64
 
-
-def effective_candidate_window(num_cipher_tokens: int) -> int:
-    return 25_000 if num_cipher_tokens >= 1_000_000 else CANDIDATE_WINDOW
-
-
-def effective_rounds(num_cipher_tokens: int) -> int:
-    return 8 if num_cipher_tokens >= 1_000_000 else ROUNDS
+ISLAND_WINDOW = 8
+ISLAND_CONTEXT = 8
+MAX_ISLANDS = 256
+MAX_ISLAND_LEN = 12
+MAX_SPAN = 2
+BEAM_SIZE = 64
+LM_WEIGHT = 0.08
+ALT_PENALTY = 0.45
+RANK_PENALTY = 0.08
+SPAN2_PENALTY = 1.8
+REFERENCE_SPAN_PENALTY = 2.6
+MIN_SCORE_GAIN = 2.0
+MAX_EMIT_BYTES = 40
+MAX_LENGTH_DELTA = 20
 
 
 def counts(ids: np.ndarray, size: int) -> np.ndarray:
     return np.bincount(ids.astype(np.int64, copy=False), minlength=size)
 
 
-def torch_context_maps(ids: np.ndarray, focus: np.ndarray, anchors: np.ndarray, device: str, offset: int = 1):
-    vocab_floor = int(max(int(ids.max(initial=0)), int(focus.max(initial=0)), int(anchors.max(initial=0)))) + 1
-    focus_lookup = torch.full((vocab_floor,), -1, dtype=torch.int32, device=device)
-    anchor_lookup = torch.full((vocab_floor,), -1, dtype=torch.int32, device=device)
-    focus_lookup[torch.as_tensor(focus.astype(np.int64), dtype=torch.long, device=device)] = torch.arange(
-        len(focus), dtype=torch.int32, device=device
-    )
-    anchor_lookup[torch.as_tensor(anchors.astype(np.int64), dtype=torch.long, device=device)] = torch.arange(
-        len(anchors), dtype=torch.int32, device=device
-    )
-    left_flat = torch.zeros(len(focus) * len(anchors), dtype=torch.float32, device=device)
-    right_flat = torch.zeros_like(left_flat)
-    base = len(anchors)
-    for start in range(0, max(0, len(ids) - offset), TORCH_CONTEXT_CHUNK):
-        stop = min(len(ids) - offset, start + TORCH_CONTEXT_CHUNK)
-        prev = torch.as_tensor(ids[start:stop].astype(np.int64, copy=False), dtype=torch.long, device=device)
-        nxt = torch.as_tensor(
-            ids[start + offset : stop + offset].astype(np.int64, copy=False),
-            dtype=torch.long,
-            device=device,
-        )
-        prev_ok = prev < vocab_floor
-        nxt_ok = nxt < vocab_floor
-
-        fi_b = torch.full_like(nxt, -1, dtype=torch.int32)
-        ai = torch.full_like(prev, -1, dtype=torch.int32)
-        fi_a = torch.full_like(prev, -1, dtype=torch.int32)
-        bi = torch.full_like(nxt, -1, dtype=torch.int32)
-        fi_b[nxt_ok] = focus_lookup[nxt[nxt_ok]]
-        ai[prev_ok] = anchor_lookup[prev[prev_ok]]
-        fi_a[prev_ok] = focus_lookup[prev[prev_ok]]
-        bi[nxt_ok] = anchor_lookup[nxt[nxt_ok]]
-
-        mask = (fi_b >= 0) & (ai >= 0)
-        if bool(mask.any()):
-            flat = fi_b[mask].to(torch.long) * base + ai[mask].to(torch.long)
-            left_flat += torch.bincount(flat, minlength=left_flat.numel()).to(torch.float32)
-
-        mask = (fi_a >= 0) & (bi >= 0)
-        if bool(mask.any()):
-            flat = fi_a[mask].to(torch.long) * base + bi[mask].to(torch.long)
-            right_flat += torch.bincount(flat, minlength=right_flat.numel()).to(torch.float32)
-
-    return left_flat.view(len(focus), len(anchors)), right_flat.view(len(focus), len(anchors))
+def lm_total_bits(byte_lm, text: str) -> float:
+    data = text.encode("utf-8", errors="replace")
+    if not data:
+        return 0.0
+    return float(byte_lm.bits_per_byte(data) * len(data))
 
 
-def normalize_features(x, token_counts: np.ndarray, device: str):
-    counts_t = torch.as_tensor(np.maximum(1.0, token_counts.astype(np.float32)), dtype=torch.float32, device=device)
-    x.div_(torch.sqrt(counts_t)[:, None])
-    norm = torch.linalg.vector_norm(x, dim=1).clamp_min(1e-12)
-    x.div_(norm[:, None])
-    return x
+def target_piece(adapter, token_id: int, cache: dict[int, str]) -> str:
+    token_id = int(token_id)
+    piece = cache.get(token_id)
+    if piece is None:
+        piece = adapter.decode([token_id])
+        cache[token_id] = piece
+    return piece
 
 
-def learn_skip_weight(
-    c_left,
-    c_right,
-    c_left2,
-    c_right2,
-    p_left,
-    p_right,
-    p_left2,
-    p_right2,
-    c_anchor_rows: np.ndarray,
-    p_focus: np.ndarray,
-    p_anchors: np.ndarray,
-    device: str,
-) -> float:
-    p_positions = {int(token_id): row for row, token_id in enumerate(p_focus)}
-    c_rows: list[int] = []
-    p_rows: list[int] = []
-    for anchor_idx, p_token in enumerate(p_anchors):
-        p_row = p_positions.get(int(p_token))
-        if p_row is None:
-            continue
-        c_rows.append(int(c_anchor_rows[anchor_idx]))
-        p_rows.append(p_row)
-        if len(c_rows) >= LEARN_WEIGHT_SEEDS:
-            break
-    if len(c_rows) < 64:
-        return SKIP_CONTEXT_WEIGHT
-
-    c_idx = torch.as_tensor(c_rows, dtype=torch.long, device=device)
-    p_idx = torch.as_tensor(p_rows, dtype=torch.long, device=device)
-    with torch.enable_grad():
-        c_base = torch.cat([c_left[c_idx], c_right[c_idx]], dim=1).detach()
-        p_base = torch.cat([p_left[p_idx], p_right[p_idx]], dim=1).detach()
-        c_skip = torch.cat([c_left2[c_idx], c_right2[c_idx]], dim=1).detach()
-        p_skip = torch.cat([p_left2[p_idx], p_right2[p_idx]], dim=1).detach()
-        raw_weight = torch.tensor(0.54132485, dtype=torch.float32, device=device, requires_grad=True)
-        optimizer = torch.optim.Adam([raw_weight], lr=LEARN_WEIGHT_LR)
-        target = torch.arange(len(c_rows), dtype=torch.long, device=device)
-        for _ in range(LEARN_WEIGHT_STEPS):
-            optimizer.zero_grad(set_to_none=True)
-            weight = torch.nn.functional.softplus(raw_weight).clamp(0.05, 4.0)
-            c_vec = torch.cat([c_base, c_skip * weight], dim=1)
-            p_vec = torch.cat([p_base, p_skip * weight], dim=1)
-            c_vec = c_vec / torch.linalg.vector_norm(c_vec, dim=1, keepdim=True).clamp_min(1e-12)
-            p_vec = p_vec / torch.linalg.vector_norm(p_vec, dim=1, keepdim=True).clamp_min(1e-12)
-            logits = (c_vec @ p_vec.T) / LEARN_WEIGHT_TEMP
-            loss = 0.5 * (
-                torch.nn.functional.cross_entropy(logits, target)
-                + torch.nn.functional.cross_entropy(logits.T, target)
-            )
-            loss.backward()
-            optimizer.step()
-        learned = float(torch.nn.functional.softplus(raw_weight).clamp(0.05, 4.0).detach().cpu())
-        del c_base, p_base, c_skip, p_skip, c_vec, p_vec, logits, loss
-    return learned
+def valid_piece(piece: str) -> bool:
+    if not piece:
+        return False
+    if "\ufffd" in piece:
+        return False
+    return len(piece.encode("utf-8", errors="replace")) <= MAX_EMIT_BYTES
 
 
-def topk_edges(
-    c_vec,
-    p_vec,
-    c_focus: np.ndarray,
-    p_focus: np.ndarray,
-    c_log: np.ndarray,
-    p_log: np.ndarray,
-    mapping: np.ndarray,
-    p_rank: np.ndarray,
-    candidate_window: int,
-    device: str,
-) -> list[tuple[float, int, int]]:
-    p_log_t = torch.as_tensor(p_log[p_focus].astype(np.float32), dtype=torch.float32, device=device)
-    p_rank_t = torch.as_tensor(p_rank[p_focus].astype(np.int64), dtype=torch.long, device=device)
-    edges: list[tuple[float, int, int]] = []
-    k = min(TORCH_TOPK, len(p_focus))
-    for start in range(0, len(c_focus), TORCH_BATCH_SIZE):
-        stop = min(len(c_focus), start + TORCH_BATCH_SIZE)
-        c_ids = c_focus[start:stop]
-        sim = c_vec[start:stop] @ p_vec.T
-        c_log_t = torch.as_tensor(c_log[c_ids].astype(np.float32), dtype=torch.float32, device=device)
-        sim -= FREQ_WEIGHT * torch.abs(c_log_t[:, None] - p_log_t[None, :])
-        if candidate_window > 0:
-            centers = torch.as_tensor(p_rank[mapping[c_ids]].astype(np.int64), dtype=torch.long, device=device)
-            mask = torch.abs(p_rank_t[None, :] - centers[:, None]) <= candidate_window
-            sim = sim.masked_fill(~mask, -1.0e9)
-        values, indices = torch.topk(sim, k=k, dim=1)
-        values_cpu = values.detach().cpu().numpy()
-        indices_cpu = indices.detach().cpu().numpy()
-        for row, c in enumerate(c_ids):
-            for col, score in zip(indices_cpu[row], values_cpu[row]):
-                if score <= -1.0e8:
-                    continue
-                edges.append((float(score), int(c), int(p_focus[int(col)])))
-    return edges
+def piece_class(piece: str) -> str:
+    stripped = piece.strip()
+    if "\n" in piece:
+        return "newline"
+    if piece.isspace():
+        return "space"
+    if stripped and stripped.isdigit():
+        return "digit"
+    if stripped and stripped.isalpha():
+        return "word"
+    if stripped and stripped.isalnum():
+        return "alnum"
+    if stripped and all(not ch.isalnum() and not ch.isspace() for ch in stripped):
+        return "punct"
+    return "mixed"
 
 
-def dense_bigram_counts(ids: np.ndarray, nodes: np.ndarray, vocab_floor: int, offset: int = 1) -> np.ndarray:
-    lookup = np.full(vocab_floor, -1, dtype=np.int32)
-    valid = nodes < vocab_floor
-    lookup[nodes[valid]] = np.arange(len(nodes), dtype=np.int32)[valid]
-    prev = lookup[ids[:-offset]]
-    nxt = lookup[ids[offset:]]
-    mask = (prev >= 0) & (nxt >= 0)
-    k = len(nodes)
-    if not bool(mask.any()):
-        return np.zeros((k, k), dtype=np.float32)
-    flat = prev[mask].astype(np.int64, copy=False) * k + nxt[mask].astype(np.int64, copy=False)
-    return np.bincount(flat, minlength=k * k).reshape(k, k).astype(np.float32)
+def class_compatible(base: str, candidate: str) -> bool:
+    base_class = piece_class(base)
+    cand_class = piece_class(candidate)
+    if base_class in {"newline", "space"}:
+        return cand_class == base_class
+    if base_class == "punct":
+        return cand_class in {"punct", "mixed"}
+    if base_class in {"word", "alnum", "digit"}:
+        return cand_class in {"word", "alnum", "digit", "mixed"}
+    return cand_class not in {"newline", "space"}
 
 
-def bigram_swap_delta(c_big: np.ndarray, p_log: np.ndarray, perm: np.ndarray, a: int, b: int) -> float:
-    pa = int(perm[a])
-    pb = int(perm[b])
-    old = (
-        float(c_big[a, :] @ p_log[pa, perm])
-        + float(c_big[b, :] @ p_log[pb, perm])
-        + float(c_big[:, a] @ p_log[perm, pa])
-        + float(c_big[:, b] @ p_log[perm, pb])
-    )
-    new_perm = perm.copy()
-    new_perm[a], new_perm[b] = new_perm[b], new_perm[a]
-    new = (
-        float(c_big[a, :] @ p_log[pb, new_perm])
-        + float(c_big[b, :] @ p_log[pa, new_perm])
-        + float(c_big[:, a] @ p_log[new_perm, pb])
-        + float(c_big[:, b] @ p_log[new_perm, pa])
-    )
-    for i in (a, b):
-        for j in (a, b):
-            old -= float(c_big[i, j] * p_log[int(perm[i]), int(perm[j])])
-            new -= float(c_big[i, j] * p_log[int(new_perm[i]), int(new_perm[j])])
-    return new - old
+def length_bucket(piece: str) -> int:
+    return min(32, len(piece.encode("utf-8", errors="replace")))
 
 
-def refine_with_bigram_objective(
+def build_initial_rank_mapping(
     cipher_ids: np.ndarray,
     ref_ids: np.ndarray,
-    mapping: np.ndarray,
-    c_focus: np.ndarray,
-    edges: list[tuple[float, int, int]],
     target_vocab_size: int,
-    p_counts: np.ndarray,
-) -> np.ndarray:
-    if not BIGRAM_OBJECTIVE_REFINE:
-        return mapping
-    token_budget = (
-        BIGRAM_REFINE_LARGE_TOKENS
-        if BIGRAM_REFINE_LARGE_TOKEN_MIN_TOKENS <= len(cipher_ids) <= BIGRAM_REFINE_LARGE_TOKEN_MAX_TOKENS
-        else BIGRAM_REFINE_TOKENS
-    )
-    k = min(token_budget, len(c_focus))
-    c_nodes = c_focus[:k]
-    p_nodes_raw = mapping[c_nodes].astype(np.int64, copy=True)
-    keep = np.zeros(k, dtype=bool)
-    seen: set[int] = set()
-    for idx, p in enumerate(p_nodes_raw):
-        if int(p) in seen:
-            continue
-        seen.add(int(p))
-        keep[idx] = True
-    c_nodes = c_nodes[keep]
-    p_nodes = p_nodes_raw[keep]
-    k = len(c_nodes)
-    if k < 64:
-        return mapping
-
-    use_skip_refine = BIGRAM_REFINE_SKIP_MIN_TOKENS <= len(cipher_ids) <= BIGRAM_REFINE_SKIP_MAX_TOKENS
-    print(f"bigram_refine_token_budget={token_budget}", flush=True)
-    print(f"bigram_refine_tokens={k}", flush=True)
-    print(f"bigram_refine_skip={use_skip_refine}", flush=True)
-    c_big = dense_bigram_counts(cipher_ids, c_nodes, len(mapping))
-    p_big = dense_bigram_counts(ref_ids, p_nodes, target_vocab_size)
-    if use_skip_refine:
-        c_big += BIGRAM_REFINE_SKIP_WEIGHT * dense_bigram_counts(cipher_ids, c_nodes, len(mapping), offset=2)
-        p_big += BIGRAM_REFINE_SKIP_WEIGHT * dense_bigram_counts(ref_ids, p_nodes, target_vocab_size, offset=2)
-    row_totals = p_big.sum(axis=1, keepdims=True)
-    block_probs = (p_big + BIGRAM_REFINE_ALPHA) / (row_totals + BIGRAM_REFINE_ALPHA * k)
-    if BIGRAM_UNIGRAM_BACKOFF and len(cipher_ids) <= BIGRAM_UNIGRAM_BACKOFF_MAX_TOKENS:
-        unigram = p_counts[p_nodes].astype(np.float32)
-        unigram = (unigram + BIGRAM_REFINE_ALPHA) / (float(unigram.sum()) + BIGRAM_REFINE_ALPHA * k)
-        lam = row_totals / (row_totals + BIGRAM_UNIGRAM_BACKOFF_TAU)
-        block_probs = lam * block_probs + (1.0 - lam) * unigram[None, :]
-        print(f"bigram_unigram_backoff_tau={BIGRAM_UNIGRAM_BACKOFF_TAU}", flush=True)
-    p_log = np.log(block_probs).astype(np.float32)
-    perm = np.arange(k, dtype=np.int32)
-    owner = np.arange(k, dtype=np.int32)
-    c_to_i = {int(c): i for i, c in enumerate(c_nodes)}
-    p_to_i = {int(p): i for i, p in enumerate(p_nodes)}
-
-    proposals: list[tuple[int, int]] = []
-    seen_proposals: set[tuple[int, int]] = set()
-    for _, c, p in edges:
-        i = c_to_i.get(c)
-        p_idx = p_to_i.get(p)
-        if i is None or p_idx is None:
-            continue
-        key = (i, p_idx)
-        if key in seen_proposals:
-            continue
-        seen_proposals.add(key)
-        proposals.append(key)
-        if len(proposals) >= BIGRAM_REFINE_MAX_PROPOSALS:
-            break
-
-    swaps = 0
-    passes_run = 0
-    pass_budget = (
-        BIGRAM_REFINE_LARGE_PASSES
-        if BIGRAM_REFINE_LARGE_TOKEN_MIN_TOKENS <= len(cipher_ids) <= BIGRAM_REFINE_LARGE_TOKEN_MAX_TOKENS
-        else BIGRAM_REFINE_PASSES
-    )
-    for _ in range(pass_budget):
-        pass_swaps = 0
-        passes_run += 1
-        for i, p_idx in proposals:
-            j = int(owner[p_idx])
-            if i == j:
-                continue
-            delta = bigram_swap_delta(c_big, p_log, perm, i, j)
-            if delta <= 0.0:
-                continue
-            pi = int(perm[i])
-            pj = int(perm[j])
-            perm[i], perm[j] = perm[j], perm[i]
-            owner[pi], owner[pj] = owner[pj], owner[pi]
-            pass_swaps += 1
-        swaps += pass_swaps
-        if pass_swaps == 0:
-            break
-
-    if swaps:
-        refined = mapping.copy()
-        refined[c_nodes] = p_nodes[perm]
-        mapping = refined
-    print(f"bigram_refine_proposals={len(proposals)}", flush=True)
-    print(f"bigram_refine_pass_budget={pass_budget}", flush=True)
-    print(f"bigram_refine_passes={passes_run}", flush=True)
-    print(f"bigram_refine_swaps={swaps}", flush=True)
-    return mapping
-
-
-def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_size: int) -> np.ndarray:
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"device: {device}", flush=True)
-    candidate_window = effective_candidate_window(len(cipher_ids))
-    rounds = effective_rounds(len(cipher_ids))
-    use_skip_context = len(cipher_ids) >= SKIP_CONTEXT_MIN_TOKENS
-    use_dynamic_anchors = len(cipher_ids) <= DYNAMIC_ANCHOR_MAX_TOKENS
-    print(f"candidate_window: {candidate_window}", flush=True)
-    print(f"skip_context: {use_skip_context}", flush=True)
-    print(f"dynamic_anchors: {use_dynamic_anchors}", flush=True)
-    c_counts = counts(cipher_ids, int(max(target_vocab_size, int(cipher_ids.max()) + 1)))
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    c_size = int(max(target_vocab_size, int(cipher_ids.max(initial=0)) + 1))
+    c_counts = counts(cipher_ids, c_size)
     p_counts = counts(ref_ids, target_vocab_size)
-    c_order_all = np.argsort(-c_counts)
-    p_order_all = np.argsort(-p_counts)
-    c_focus = c_order_all[: min(TOP_TOKENS, np.count_nonzero(c_counts))].astype(np.int64)
-    p_focus = p_order_all[: min(TOP_TOKENS, np.count_nonzero(p_counts))].astype(np.int64)
+    c_order = np.argsort(-c_counts)
+    p_order = np.argsort(-p_counts)
+    observed = c_order[c_counts[c_order] > 0]
 
-    mapping = np.zeros(max(len(c_counts), target_vocab_size), dtype=np.int64)
-    init = c_order_all[: len(p_order_all)]
-    mapping[init] = p_order_all[: len(init)]
+    mapping = np.zeros(c_size, dtype=np.int64)
+    if len(p_order):
+        repeated = np.resize(p_order, len(observed))
+        mapping[observed] = repeated
 
-    c_log = np.log(np.maximum(c_counts, 1) / max(1, int(c_counts.sum())))
-    p_log = np.log(np.maximum(p_counts, 1) / max(1, int(p_counts.sum())))
+    c_rank = np.full(c_size, len(observed) + 1, dtype=np.int64)
+    c_rank[observed] = np.arange(len(observed), dtype=np.int64)
     p_rank = np.empty(target_vocab_size, dtype=np.int64)
-    p_rank[p_order_all] = np.arange(target_vocab_size)
-    c_focus_pos = {int(token_id): row for row, token_id in enumerate(c_focus)}
-    anchor_rows = np.arange(min(ANCHORS, len(c_focus)), dtype=np.int64)
+    p_rank[p_order] = np.arange(target_vocab_size, dtype=np.int64)
+    return mapping, c_rank, p_rank, c_counts, p_counts
 
-    for round_idx in range(rounds):
-        c_anchors = c_focus[anchor_rows]
-        p_anchors = mapping[c_anchors]
-        print(f"round {round_idx + 1}/{rounds}: focus={len(c_focus)} anchors={len(c_anchors)}", flush=True)
-        with torch.no_grad():
-            c_left, c_right = torch_context_maps(cipher_ids, c_focus, c_anchors, device)
-            p_left, p_right = torch_context_maps(ref_ids, p_focus, p_anchors, device)
-            c_parts = [c_left, c_right]
-            p_parts = [p_left, p_right]
-            if use_skip_context:
-                c_left2, c_right2 = torch_context_maps(cipher_ids, c_focus, c_anchors, device, offset=2)
-                p_left2, p_right2 = torch_context_maps(ref_ids, p_focus, p_anchors, device, offset=2)
-                skip_weight = SKIP_CONTEXT_WEIGHT
-                if LEARN_SKIP_WEIGHT:
-                    skip_weight = learn_skip_weight(
-                        c_left,
-                        c_right,
-                        c_left2,
-                        c_right2,
-                        p_left,
-                        p_right,
-                        p_left2,
-                        p_right2,
-                        anchor_rows,
-                        p_focus,
-                        p_anchors,
-                        device,
-                    )
-                    print(f"learned_skip_weight: {skip_weight:.4f}", flush=True)
-                c_left2.mul_(skip_weight)
-                c_right2.mul_(skip_weight)
-                p_left2.mul_(skip_weight)
-                p_right2.mul_(skip_weight)
-                c_parts.extend([c_left2, c_right2])
-                p_parts.extend([p_left2, p_right2])
-            c_vec = normalize_features(torch.cat(c_parts, dim=1), c_counts[c_focus], device)
-            p_vec = normalize_features(torch.cat(p_parts, dim=1), p_counts[p_focus], device)
-            del c_parts, p_parts, c_left, c_right, p_left, p_right
-            if use_skip_context:
-                del c_left2, c_right2, p_left2, p_right2
-            edges = topk_edges(
-                c_vec,
-                p_vec,
-                c_focus,
-                p_focus,
-                c_log,
-                p_log,
-                mapping,
-                p_rank,
-                candidate_window,
-                device,
-            )
-            del c_vec, p_vec
-            if device == "cuda":
-                torch.cuda.empty_cache()
 
-        edges.sort(reverse=True)
-        used_c: set[int] = set()
-        used_p: set[int] = set()
-        assigned_p_by_c: dict[int, int] = {}
-        assigned_c_by_p: dict[int, int] = {}
-        assigned_score_by_c: dict[int, float] = {}
-        score_by_c: dict[int, dict[int, float]] | None = {} if use_dynamic_anchors and ENABLE_DYNAMIC_ASSIGNMENT_SWAPS else None
-        if score_by_c is not None:
-            for score, c, p in edges:
-                score_by_c.setdefault(c, {})[p] = score
+def add_candidate(out: list[tuple[str, float]], seen: set[str], piece: str, score: float) -> None:
+    if piece in seen or not valid_piece(piece):
+        return
+    seen.add(piece)
+    out.append((piece, score))
 
-        for score, c, p in edges:
-            if c in used_c or p in used_p:
+
+@dataclass
+class CandidateState:
+    mapping: np.ndarray
+    c_rank: np.ndarray
+    p_rank: np.ndarray
+    p_order: np.ndarray
+    target_adapter: object
+    piece_cache: dict[int, str]
+    single_cache: dict[int, list[tuple[str, float]]]
+    pair_cache: dict[tuple[int, int], list[tuple[str, float]]]
+    reference_spans: dict[tuple[str, int], list[str]]
+
+
+def singleton_candidates(state: CandidateState, c: int) -> list[tuple[str, float]]:
+    c = int(c)
+    cached = state.single_cache.get(c)
+    if cached is not None:
+        return cached
+
+    current_p = int(state.mapping[c])
+    current_piece = target_piece(state.target_adapter, current_p, state.piece_cache)
+    out: list[tuple[str, float]] = []
+    seen: set[str] = set()
+    add_candidate(out, seen, current_piece, 0.0)
+
+    center = int(min(max(state.c_rank[c], 0), len(state.p_order) - 1))
+    lo = max(0, center - RANK_WINDOW)
+    hi = min(len(state.p_order), center + RANK_WINDOW + 1)
+    scored: list[tuple[float, int, str]] = []
+    for p in state.p_order[lo:hi]:
+        p_int = int(p)
+        piece = target_piece(state.target_adapter, p_int, state.piece_cache)
+        if not valid_piece(piece) or not class_compatible(current_piece, piece):
+            continue
+        rank_delta = abs(int(state.p_rank[p_int]) - center)
+        prior = -ALT_PENALTY - RANK_PENALTY * math.log1p(rank_delta)
+        scored.append((prior, p_int, piece))
+    scored.sort(reverse=True)
+    for rank, (prior, _, piece) in enumerate(scored[: SINGLE_CANDIDATES - 1]):
+        add_candidate(out, seen, piece, prior - 0.08 * rank)
+
+    state.single_cache[c] = out[:SINGLE_CANDIDATES]
+    return state.single_cache[c]
+
+
+def pair_candidates(state: CandidateState, left: int, right: int) -> list[tuple[str, float]]:
+    key = (int(left), int(right))
+    cached = state.pair_cache.get(key)
+    if cached is not None:
+        return cached
+
+    left_options = singleton_candidates(state, key[0])[:4]
+    right_options = singleton_candidates(state, key[1])[:4]
+    base = left_options[0][0] + right_options[0][0]
+    out: list[tuple[str, float]] = []
+    seen: set[str] = set()
+    add_candidate(out, seen, base, -SPAN2_PENALTY)
+
+    for li, (lp, lscore) in enumerate(left_options):
+        for ri, (rp, rscore) in enumerate(right_options):
+            piece = lp + rp
+            if abs(len(piece) - len(base)) > MAX_LENGTH_DELTA:
                 continue
-            assigned_p_by_c[c] = p
-            assigned_c_by_p[p] = c
-            assigned_score_by_c[c] = score
-            used_c.add(c)
-            used_p.add(p)
+            score = -SPAN2_PENALTY + 0.5 * (lscore + rscore) - 0.12 * (li + ri)
+            add_candidate(out, seen, piece, score)
 
-        swap_count = 0
-        if score_by_c is not None:
-            for score, c, p in edges:
-                current_p = assigned_p_by_c.get(c)
-                other_c = assigned_c_by_p.get(p)
-                if current_p is None or other_c is None or current_p == p or other_c == c:
-                    continue
-                other_scores = score_by_c.get(other_c)
-                if other_scores is None:
-                    continue
-                other_new_score = other_scores.get(current_p)
-                if other_new_score is None:
-                    continue
-                current_score = assigned_score_by_c[c]
-                other_current_score = assigned_score_by_c[other_c]
-                if score + other_new_score <= current_score + other_current_score + ASSIGNMENT_SWAP_MIN_GAIN:
-                    continue
-                assigned_p_by_c[c] = p
-                assigned_p_by_c[other_c] = current_p
-                assigned_c_by_p[p] = c
-                assigned_c_by_p[current_p] = other_c
-                assigned_score_by_c[c] = score
-                assigned_score_by_c[other_c] = other_new_score
-                swap_count += 1
-            print(f"assignment_swaps={swap_count}", flush=True)
+    if len(base.encode("utf-8", errors="replace")) <= MAX_EMIT_BYTES:
+        encoded = state.target_adapter.encode(base)
+        if 1 <= len(encoded) <= 2:
+            normalized = state.target_adapter.decode(encoded)
+            add_candidate(out, seen, normalized, -SPAN2_PENALTY - 0.2)
 
-        assigned_scores = [(score, c) for c, score in assigned_score_by_c.items()]
-        next_mapping = mapping.copy()
-        for c, p in assigned_p_by_c.items():
-            next_mapping[c] = p
-        mapping = next_mapping
-        if round_idx == rounds - 1 and (use_dynamic_anchors or BIGRAM_REFINE_ALL_SCALES):
-            mapping = refine_with_bigram_objective(
-                cipher_ids,
-                ref_ids,
-                mapping,
-                c_focus,
-                edges,
-                target_vocab_size,
-                p_counts,
-            )
-        if use_dynamic_anchors and len(assigned_scores) >= 64:
-            assigned_scores.sort(reverse=True)
-            next_anchor_rows: list[int] = []
-            seen_rows: set[int] = set()
-            for _, c in assigned_scores:
-                row = c_focus_pos.get(int(c))
-                if row is None or row in seen_rows:
-                    continue
-                next_anchor_rows.append(row)
-                seen_rows.add(row)
-                if len(next_anchor_rows) >= min(ANCHORS, len(c_focus)):
-                    break
-            if len(next_anchor_rows) >= 64:
-                anchor_rows = np.asarray(next_anchor_rows, dtype=np.int64)
-                print(f"anchor_refresh={len(anchor_rows)}", flush=True)
-        print(f"assigned={len(used_c)}", flush=True)
-    return mapping
+    bucket = (piece_class(base), length_bucket(base))
+    for span in state.reference_spans.get(bucket, [])[:8]:
+        if abs(len(span) - len(base)) > MAX_LENGTH_DELTA:
+            continue
+        add_candidate(out, seen, span, -REFERENCE_SPAN_PENALTY)
+
+    state.pair_cache[key] = out[:PAIR_CANDIDATES]
+    return state.pair_cache[key]
+
+
+def build_reference_span_inventory(reference_text: Path) -> dict[tuple[str, int], list[str]]:
+    raw = reference_text.read_bytes()[:REFERENCE_SPAN_BYTES].decode("utf-8", errors="ignore")
+    pattern = re.compile(
+        r"\n+|\s+[A-Za-z]{1,24}|[A-Za-z]{2,24}|\s+\d{1,10}|\d{1,10}|"
+        r"\s*[.,;:!?()\[\]{}\"'`\\/-]+"
+    )
+    counts_by_bucket: dict[tuple[str, int], Counter[str]] = {}
+    for match in pattern.finditer(raw):
+        piece = match.group(0)
+        if not valid_piece(piece):
+            continue
+        bucket = (piece_class(piece), length_bucket(piece))
+        counts_by_bucket.setdefault(bucket, Counter())[piece] += 1
+
+    inventory: dict[tuple[str, int], list[str]] = {}
+    for bucket, counter in counts_by_bucket.items():
+        inventory[bucket] = [piece for piece, _ in counter.most_common(REFERENCE_SPANS_PER_BUCKET)]
+    return inventory
+
+
+def baseline_piece_sequence(ids: np.ndarray, state: CandidateState) -> list[str]:
+    return [target_piece(state.target_adapter, int(state.mapping[int(c)]), state.piece_cache) for c in ids]
+
+
+def pick_high_loss_islands(pieces: list[str], byte_lm) -> list[tuple[int, int]]:
+    scored: list[tuple[float, int, int]] = []
+    n = len(pieces)
+    for start in range(0, max(0, n - ISLAND_WINDOW + 1), max(1, ISLAND_WINDOW // 2)):
+        end = min(n, start + ISLAND_WINDOW)
+        text = "".join(pieces[start:end])
+        data_len = max(1, len(text.encode("utf-8", errors="replace")))
+        score = lm_total_bits(byte_lm, text) / data_len
+        scored.append((score, start, end))
+    scored.sort(reverse=True)
+
+    selected: list[tuple[int, int]] = []
+    occupied = np.zeros(n, dtype=bool)
+    for _, start, end in scored:
+        start = max(0, start)
+        end = min(n, start + min(MAX_ISLAND_LEN, end - start))
+        if end <= start or occupied[max(0, start - ISLAND_CONTEXT) : min(n, end + ISLAND_CONTEXT)].any():
+            continue
+        selected.append((start, end))
+        occupied[start:end] = True
+        if len(selected) >= MAX_ISLANDS:
+            break
+    selected.sort()
+    return selected
+
+
+def segmental_decode_island(
+    island_ids: np.ndarray,
+    old_pieces: list[str],
+    prefix: str,
+    suffix: str,
+    state: CandidateState,
+    byte_lm,
+) -> tuple[str, float, int]:
+    n = len(island_ids)
+    old_mid = "".join(old_pieces)
+    prefix_bits = lm_total_bits(byte_lm, prefix)
+    old_score = -LM_WEIGHT * (lm_total_bits(byte_lm, prefix + old_mid + suffix) - prefix_bits)
+
+    beams: list[list[tuple[float, str, int]]] = [[] for _ in range(n + 1)]
+    beams[0] = [(0.0, "", 0)]
+    bits_cache: dict[str, float] = {prefix: prefix_bits}
+
+    def bits(text: str) -> float:
+        value = bits_cache.get(text)
+        if value is None:
+            value = lm_total_bits(byte_lm, text)
+            bits_cache[text] = value
+        return value
+
+    for i in range(n):
+        if not beams[i]:
+            continue
+        for score, emitted, span2_count in beams[i]:
+            before = prefix + emitted
+            before_bits = bits(before)
+            c = int(island_ids[i])
+            for piece, prior in singleton_candidates(state, c):
+                after = emitted + piece
+                delta_bits = bits(prefix + after) - before_bits
+                beams[i + 1].append((score - LM_WEIGHT * delta_bits + prior, after, span2_count))
+            if MAX_SPAN >= 2 and i + 1 < n:
+                right = int(island_ids[i + 1])
+                for piece, prior in pair_candidates(state, c, right):
+                    after = emitted + piece
+                    delta_bits = bits(prefix + after) - before_bits
+                    beams[i + 2].append((score - LM_WEIGHT * delta_bits + prior, after, span2_count + 1))
+        for j in (i + 1, i + 2):
+            if j <= n and len(beams[j]) > BEAM_SIZE:
+                beams[j].sort(key=lambda item: item[0], reverse=True)
+                beams[j] = beams[j][:BEAM_SIZE]
+
+    best_text = old_mid
+    best_score = -math.inf
+    best_span2 = 0
+    for score, emitted, span2_count in beams[n]:
+        if abs(len(emitted) - len(old_mid)) > MAX_LENGTH_DELTA:
+            continue
+        suffix_bits = bits(prefix + emitted + suffix) - bits(prefix + emitted)
+        total = score - LM_WEIGHT * suffix_bits
+        if total > best_score:
+            best_score = total
+            best_text = emitted
+            best_span2 = span2_count
+    gain = best_score - old_score
+    return best_text, gain, best_span2
+
+
+def graphless_segmental_decode(task) -> str:
+    sample_ids = task.cipher_ids[: min(len(task.cipher_ids), SAMPLE_TOKENS)]
+    mapping, c_rank, p_rank, _, p_counts = build_initial_rank_mapping(
+        task.cipher_ids,
+        task.ref_ids,
+        task.target_adapter.spec.vocab_size,
+    )
+    p_order = np.argsort(-p_counts)
+    state = CandidateState(
+        mapping=mapping,
+        c_rank=c_rank,
+        p_rank=p_rank,
+        p_order=p_order,
+        target_adapter=task.target_adapter,
+        piece_cache={},
+        single_cache={},
+        pair_cache={},
+        reference_spans=build_reference_span_inventory(task.reference_text),
+    )
+    pieces = baseline_piece_sequence(sample_ids, state)
+    islands = pick_high_loss_islands(pieces, task.byte_lm)
+
+    accepted = 0
+    span2_used = 0
+    gains: list[float] = []
+    for start, end in islands:
+        prefix = "".join(pieces[max(0, start - ISLAND_CONTEXT) : start])
+        suffix = "".join(pieces[end : min(len(pieces), end + ISLAND_CONTEXT)])
+        new_text, gain, span2 = segmental_decode_island(
+            sample_ids[start:end],
+            pieces[start:end],
+            prefix,
+            suffix,
+            state,
+            task.byte_lm,
+        )
+        if new_text == "".join(pieces[start:end]) or gain < MIN_SCORE_GAIN:
+            continue
+        pieces[start:end] = [new_text] + [""] * (end - start - 1)
+        accepted += 1
+        span2_used += span2
+        gains.append(gain)
+
+    print(f"rank_init_focus={min(FOCUS_TYPES, len(np.unique(task.cipher_ids)))}", flush=True)
+    print(f"segmental_islands={len(islands)} accepted={accepted} span2_used={span2_used}", flush=True)
+    if gains:
+        arr = np.asarray(gains, dtype=np.float32)
+        print(f"segmental_gain_median={float(np.median(arr)):.6f}", flush=True)
+        print(f"segmental_gain_p90={float(np.percentile(arr, 90)):.6f}", flush=True)
+    return "".join(pieces)
 
 
 def main() -> None:
@@ -556,9 +411,7 @@ def main() -> None:
     print(f"cipher_tokens: {len(task.cipher_ids):,}")
     print(f"reference_tokens: {len(task.ref_ids):,}")
 
-    mapping = align_shuffled(task.cipher_ids, task.ref_ids, task.target_adapter.spec.vocab_size)
-    mapped_sample = mapping[task.cipher_ids[:SAMPLE_TOKENS]]
-    recovered_sample = task.target_adapter.decode(mapped_sample.tolist())
+    recovered_sample = graphless_segmental_decode(task)
     metrics = evaluate_recovery(task, recovered_sample, SAMPLE_TOKENS)
 
     out_dir = CACHE_DIR / "runs"
@@ -570,18 +423,12 @@ def main() -> None:
         "target_tokens": int(len(task.cipher_ids)),
         "reference_tokens": int(len(task.ref_ids)),
         "sample_tokens": SAMPLE_TOKENS,
-        "top_tokens": TOP_TOKENS,
-        "anchors": ANCHORS,
-        "candidate_window": effective_candidate_window(len(task.cipher_ids)),
-        "rounds": effective_rounds(len(task.cipher_ids)),
-        "freq_weight": FREQ_WEIGHT,
-        "torch_topk": TORCH_TOPK,
-        "skip_context": len(task.cipher_ids) >= SKIP_CONTEXT_MIN_TOKENS,
-        "dynamic_anchors": len(task.cipher_ids) <= DYNAMIC_ANCHOR_MAX_TOKENS,
-        "dynamic_assignment_swaps": ENABLE_DYNAMIC_ASSIGNMENT_SWAPS,
-        "bigram_refine_all_scales": BIGRAM_REFINE_ALL_SCALES,
-        "skip_context_weight": SKIP_CONTEXT_WEIGHT,
-        "learn_skip_weight": LEARN_SKIP_WEIGHT,
+        "decoder": "graphless_segmental_transducer",
+        "rank_window": RANK_WINDOW,
+        "single_candidates": SINGLE_CANDIDATES,
+        "pair_candidates": PAIR_CANDIDATES,
+        "beam_size": BEAM_SIZE,
+        "lm_weight": LM_WEIGHT,
         "elapsed_seconds": time.time() - t0,
         "metrics": metrics,
         "preview": recovered_sample[:1000],
@@ -596,9 +443,6 @@ def main() -> None:
     print(f"elapsed_seconds:  {time.time() - t0:.1f}")
     print(f"target_tokens_M:  {len(task.cipher_ids) / 1e6:.3f}")
     print(f"reference_tokens_M: {len(task.ref_ids) / 1e6:.3f}")
-    print(f"top_tokens:       {TOP_TOKENS}")
-    print(f"anchors:          {ANCHORS}")
-    print(f"rounds:           {effective_rounds(len(task.cipher_ids))}")
 
 
 if __name__ == "__main__":

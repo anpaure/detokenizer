@@ -109,3 +109,4 @@ ad25bf4	qwen36-o200k-100k-screen	0.468580	0.468580	2.743575	6.3	discard	final-on
 cff784e	qwen36-o200k-1m-screen	0.300500	0.300500	2.785068	6.3	discard	first-order edge regularization blocked useful swaps and worsened hard 1m screen
 cff784e	qwen36-o200k-100k-screen	0.489720	0.489720	2.762881	6.3	discard	first-order edge regularization badly underfit low-data hard screen
 3bdb91c	qwen36-o200k-100k-screen	0.476540	0.476540	2.743618	6.3	discard	unigram-backoff smoothing tau 100 worsened hard low-data screen
+graphless-seg-a	qwen36-o200k-100k-screen	0.772580	0.772580	3.158509	6.3	discard	graphless rank-initialized segmental byte transducer accepted 51 islands but cannot recover from a weak lexicon initializer
