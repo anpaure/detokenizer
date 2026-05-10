@@ -93,6 +93,12 @@ EXTERNAL_OWNER_CONTEXTS = 8_192
 EXTERNAL_OWNER_CANDIDATES = 5
 EXTERNAL_OWNER_MIN_COUNT = 5
 EXTERNAL_OWNER_MIN_GAIN_PER_OCC = 0.35
+LCB_EXTERNAL_OWNER_REPAIR = True
+LCB_EXTERNAL_OWNER_MAX_TOKENS = 100_000
+LCB_EXTERNAL_OWNER_SHARDS = 5
+LCB_EXTERNAL_OWNER_LAMBDA = 1.0
+LCB_EXTERNAL_OWNER_MIN_SHARD_POSITIVE = 3
+LCB_EXTERNAL_OWNER_SKIP_FLOOR = -0.25
 VARIABLE_EMISSION_REPAIR = True
 VARIABLE_EMISSION_MAX_TOKENS = 100_000
 VARIABLE_EMISSION_NODES = 512
@@ -732,14 +738,16 @@ def tail_unary_repair(
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     with torch.no_grad():
-        scores = torch.as_tensor(c_right, dtype=torch.float32, device=device) @ torch.as_tensor(
+        right_scores_t = torch.as_tensor(c_right, dtype=torch.float32, device=device) @ torch.as_tensor(
             p_right_log, dtype=torch.float32, device=device
         ).T
-        scores.add_(
+        left_scores_t = (
             torch.as_tensor(c_left, dtype=torch.float32, device=device)
             @ torch.as_tensor(p_left_log, dtype=torch.float32, device=device)
         )
-        score_np = scores.cpu().numpy()
+        score_np = (right_scores_t + left_scores_t).cpu().numpy()
+        right_score_np = right_scores_t.cpu().numpy()
+        left_score_np = left_scores_t.cpu().numpy()
 
     repaired = mapping.copy()
     accepted = 0
@@ -868,18 +876,20 @@ def external_owner_repair(
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     with torch.no_grad():
-        scores = torch.as_tensor(c_right, dtype=torch.float32, device=device) @ torch.as_tensor(
+        right_scores_t = torch.as_tensor(c_right, dtype=torch.float32, device=device) @ torch.as_tensor(
             p_right_log, dtype=torch.float32, device=device
         ).T
-        scores.add_(
+        left_scores_t = (
             torch.as_tensor(c_left, dtype=torch.float32, device=device)
             @ torch.as_tensor(p_left_log, dtype=torch.float32, device=device)
         )
-        score_np = scores.cpu().numpy()
+        score_np = (right_scores_t + left_scores_t).cpu().numpy()
+        right_score_np = right_scores_t.cpu().numpy()
+        left_score_np = left_scores_t.cpu().numpy()
 
     node_pos = {int(c): i for i, c in enumerate(repair_nodes)}
     p_pos = {int(p): i for i, p in enumerate(candidate_p)}
-    proposals: list[tuple[float, int, int, int, int]] = []
+    proposals: list[tuple[float, int, int, int, int, int, int, int, int]] = []
     for c, p, owner in candidates:
         old_c = int(mapping[c])
         old_owner = int(mapping[owner])
@@ -897,14 +907,98 @@ def external_owner_repair(
         gain_per_occ = (new_score - old_score) / occ
         if gain_per_occ < EXTERNAL_OWNER_MIN_GAIN_PER_OCC:
             continue
-        proposals.append((gain_per_occ, c, p, owner, old_c))
+        proposals.append((gain_per_occ, c, p, owner, old_c, ci, oi, pi, old_ci))
+
+    if LCB_EXTERNAL_OWNER_REPAIR and len(cipher_ids) <= LCB_EXTERNAL_OWNER_MAX_TOKENS and proposals:
+        c_right2 = dense_cross_bigram_counts(cipher_ids, repair_arr, context_c_arr, len(mapping), offset=2)
+        c_left2 = dense_cross_bigram_counts(cipher_ids, context_c_arr, repair_arr, len(mapping), offset=2).T
+        p_right2 = dense_cross_bigram_counts(ref_ids, candidate_p_arr, context_p_arr, target_vocab_size, offset=2)
+        p_left2 = dense_cross_bigram_counts(ref_ids, context_p_arr, candidate_p_arr, target_vocab_size, offset=2)
+        p_right2_log = np.log(
+            (p_right2 + BIGRAM_REFINE_ALPHA)
+            / (p_right2.sum(axis=1, keepdims=True) + BIGRAM_REFINE_ALPHA * len(context_p_arr))
+        ).astype(np.float32)
+        p_left2_log = np.log(
+            (p_left2 + BIGRAM_REFINE_ALPHA)
+            / (p_left2.sum(axis=1, keepdims=True) + BIGRAM_REFINE_ALPHA * len(candidate_p_arr))
+        ).astype(np.float32)
+        shard_views: list[tuple[np.ndarray, np.ndarray]] = []
+        shard_count = max(1, LCB_EXTERNAL_OWNER_SHARDS)
+        shard_len = max(2, len(cipher_ids) // shard_count)
+        for shard_idx in range(shard_count):
+            start_pos = shard_idx * shard_len
+            stop_pos = len(cipher_ids) if shard_idx == shard_count - 1 else min(len(cipher_ids), (shard_idx + 1) * shard_len)
+            if stop_pos - start_pos < 4:
+                continue
+            shard = cipher_ids[start_pos:stop_pos]
+            shard_right = dense_cross_bigram_counts(shard, repair_arr, context_c_arr, len(mapping))
+            shard_left = dense_cross_bigram_counts(shard, context_c_arr, repair_arr, len(mapping)).T
+            shard_views.append((shard_right, shard_left))
+        gated: list[tuple[float, int, int, int, int, int, int, int, int]] = []
+        reject_direction = 0
+        reject_skip = 0
+        reject_shard = 0
+        lcb_values: list[float] = []
+        for proposal in proposals:
+            gain_per_occ, c, p, owner, old_c, ci, oi, pi, old_ci = proposal
+            old_right = float(right_score_np[ci, old_ci] + right_score_np[oi, pi])
+            new_right = float(right_score_np[ci, pi] + right_score_np[oi, old_ci])
+            old_left = float(left_score_np[ci, old_ci] + left_score_np[oi, pi])
+            new_left = float(left_score_np[ci, pi] + left_score_np[oi, old_ci])
+            full_gain = max(1.0, float(c_counts[c] + c_counts[owner])) * gain_per_occ
+            if new_right <= old_right or new_left <= old_left:
+                reject_direction += 1
+                continue
+            skip_delta = float(c_right2[ci] @ (p_right2_log[pi] - p_right2_log[old_ci]))
+            skip_delta += float(c_right2[oi] @ (p_right2_log[old_ci] - p_right2_log[pi]))
+            skip_delta += float(c_left2[ci] @ (p_left2_log[:, pi] - p_left2_log[:, old_ci]))
+            skip_delta += float(c_left2[oi] @ (p_left2_log[:, old_ci] - p_left2_log[:, pi]))
+            if skip_delta < LCB_EXTERNAL_OWNER_SKIP_FLOOR * full_gain:
+                reject_skip += 1
+                continue
+            shard_deltas = np.asarray(
+                [
+                    float(sr[ci] @ (p_right_log[pi] - p_right_log[old_ci]))
+                    + float(sr[oi] @ (p_right_log[old_ci] - p_right_log[pi]))
+                    + float(sl[ci] @ (p_left_log[:, pi] - p_left_log[:, old_ci]))
+                    + float(sl[oi] @ (p_left_log[:, old_ci] - p_left_log[:, pi]))
+                    for sr, sl in shard_views
+                ],
+                dtype=np.float32,
+            )
+            if shard_deltas.size == 0:
+                reject_shard += 1
+                continue
+            positive = int(np.count_nonzero(shard_deltas > 0.0))
+            if positive < min(LCB_EXTERNAL_OWNER_MIN_SHARD_POSITIVE, len(shard_deltas)):
+                reject_shard += 1
+                continue
+            median = float(np.median(shard_deltas))
+            mad = float(np.median(np.abs(shard_deltas - median)))
+            lcb = median - LCB_EXTERNAL_OWNER_LAMBDA * mad
+            if lcb <= 0.0:
+                reject_shard += 1
+                continue
+            lcb_values.append(lcb / max(1.0, float(c_counts[c] + c_counts[owner])))
+            gated.append(proposal)
+        print(
+            f"external_owner_lcb_checked={len(proposals)} accepted={len(gated)} "
+            f"reject_direction={reject_direction} reject_skip={reject_skip} reject_shard={reject_shard}",
+            flush=True,
+        )
+        if lcb_values:
+            arr = np.asarray(lcb_values, dtype=np.float32)
+            print(f"external_owner_lcb_per_occ_median={float(np.median(arr)):.6f}", flush=True)
+            print(f"external_owner_lcb_per_occ_p10={float(np.percentile(arr, 10)):.6f}", flush=True)
+            print(f"external_owner_lcb_per_occ_p90={float(np.percentile(arr, 90)):.6f}", flush=True)
+        proposals = gated
 
     proposals.sort(reverse=True)
     repaired = mapping.copy()
     used_nodes: set[int] = set()
     used_targets: set[int] = set()
     accepted = 0
-    for gain, c, p, owner, old_c in proposals:
+    for gain, c, p, owner, old_c, _, _, _, _ in proposals:
         if c in used_nodes or owner in used_nodes or p in used_targets or old_c in used_targets:
             continue
         if int(repaired[c]) != old_c or int(repaired[owner]) != p:
