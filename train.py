@@ -43,6 +43,7 @@ CANDIDATE_WINDOW = 10_000
 ROUNDS = 6
 FREQ_WEIGHT = 0.12
 TORCH_TOPK = 64
+INCLUDE_CURRENT_EDGE = True
 TORCH_BATCH_SIZE = 256
 TORCH_CONTEXT_CHUNK = 5_000_000
 
@@ -122,6 +123,8 @@ def topk_edges(
 ) -> list[tuple[float, int, int]]:
     p_log_t = torch.as_tensor(p_log[p_focus].astype(np.float32), dtype=torch.float32, device=device)
     p_rank_t = torch.as_tensor(p_rank[p_focus].astype(np.int64), dtype=torch.long, device=device)
+    p_pos = np.full(int(max(int(p_focus.max(initial=0)), int(mapping[c_focus].max(initial=0)))) + 1, -1, dtype=np.int64)
+    p_pos[p_focus] = np.arange(len(p_focus), dtype=np.int64)
     edges: list[tuple[float, int, int]] = []
     k = min(TORCH_TOPK, len(p_focus))
     for start in range(0, len(c_focus), TORCH_BATCH_SIZE):
@@ -142,6 +145,20 @@ def topk_edges(
                 if score <= -1.0e8:
                     continue
                 edges.append((float(score), int(c), int(p_focus[int(col)])))
+        if INCLUDE_CURRENT_EDGE:
+            current_p = mapping[c_ids]
+            current_cols = np.full(len(c_ids), -1, dtype=np.int64)
+            valid_current = current_p < len(p_pos)
+            current_cols[valid_current] = p_pos[current_p[valid_current]]
+            valid_rows = np.flatnonzero(current_cols >= 0)
+            if len(valid_rows):
+                row_t = torch.as_tensor(valid_rows.astype(np.int64), dtype=torch.long, device=device)
+                col_t = torch.as_tensor(current_cols[valid_rows].astype(np.int64), dtype=torch.long, device=device)
+                current_scores = sim[row_t, col_t].detach().cpu().numpy()
+                for row, score in zip(valid_rows, current_scores):
+                    if score <= -1.0e8:
+                        continue
+                    edges.append((float(score), int(c_ids[row]), int(current_p[row])))
     return edges
 
 
@@ -242,6 +259,7 @@ def main() -> None:
         "rounds": effective_rounds(len(task.cipher_ids)),
         "freq_weight": FREQ_WEIGHT,
         "torch_topk": TORCH_TOPK,
+        "include_current_edge": INCLUDE_CURRENT_EDGE,
         "elapsed_seconds": time.time() - t0,
         "metrics": metrics,
         "preview": recovered_sample[:1000],
