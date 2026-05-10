@@ -58,6 +58,7 @@ ASSIGNMENT_SWAP_MIN_GAIN = 0.01
 BIGRAM_OBJECTIVE_REFINE = True
 BIGRAM_REFINE_TOKENS = 2_048
 BIGRAM_REFINE_MAX_PROPOSALS = 100_000
+BIGRAM_REFINE_PASSES = 2
 BIGRAM_REFINE_ALPHA = 0.05
 
 
@@ -311,24 +312,32 @@ def refine_with_bigram_objective(
             break
 
     swaps = 0
-    for i, p_idx in proposals:
-        j = int(owner[p_idx])
-        if i == j:
-            continue
-        delta = bigram_swap_delta(c_big, p_log, perm, i, j)
-        if delta <= 0.0:
-            continue
-        pi = int(perm[i])
-        pj = int(perm[j])
-        perm[i], perm[j] = perm[j], perm[i]
-        owner[pi], owner[pj] = owner[pj], owner[pi]
-        swaps += 1
+    passes_run = 0
+    for _ in range(BIGRAM_REFINE_PASSES):
+        pass_swaps = 0
+        passes_run += 1
+        for i, p_idx in proposals:
+            j = int(owner[p_idx])
+            if i == j:
+                continue
+            delta = bigram_swap_delta(c_big, p_log, perm, i, j)
+            if delta <= 0.0:
+                continue
+            pi = int(perm[i])
+            pj = int(perm[j])
+            perm[i], perm[j] = perm[j], perm[i]
+            owner[pi], owner[pj] = owner[pj], owner[pi]
+            pass_swaps += 1
+        swaps += pass_swaps
+        if pass_swaps == 0:
+            break
 
     if swaps:
         refined = mapping.copy()
         refined[c_nodes] = p_nodes[perm]
         mapping = refined
     print(f"bigram_refine_proposals={len(proposals)}", flush=True)
+    print(f"bigram_refine_passes={passes_run}", flush=True)
     print(f"bigram_refine_swaps={swaps}", flush=True)
     return mapping
 
