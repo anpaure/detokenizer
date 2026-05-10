@@ -40,6 +40,7 @@ SAMPLE_TOKENS = int(os.environ.get("DETOK_SAMPLE_TOKENS", DEFAULT_SAMPLE_TOKENS)
 SEED = int(os.environ.get("DETOK_SEED", DEFAULT_SEED))
 ENABLE_DIAGNOSTICS = os.environ.get("DETOK_DIAGNOSTICS", "1") != "0"
 ORACLE_RERANKER_DIAGNOSTIC = os.environ.get("DETOK_ORACLE_RERANKER_DIAGNOSTIC", "0") == "1"
+SYNTHETIC_RERANKER_DIAGNOSTIC = os.environ.get("DETOK_SYNTHETIC_RERANKER_DIAGNOSTIC", "0") == "1"
 
 TOP_TOKENS = 50_000
 ANCHORS = 8_192
@@ -145,6 +146,10 @@ ORACLE_RERANKER_STEPS = 220
 ORACLE_RERANKER_LR = 0.08
 ORACLE_RERANKER_L2 = 1.0e-3
 ORACLE_RERANKER_WEIGHT_CAP = 25.0
+SYNTHETIC_RERANKER_TOKENS = int(os.environ.get("DETOK_SYNTHETIC_RERANKER_TOKENS", "100000"))
+SYNTHETIC_RERANKER_REF_TOKENS = int(os.environ.get("DETOK_SYNTHETIC_RERANKER_REF_TOKENS", "500000"))
+SYNTHETIC_RERANKER_TASKS = ("mixed", "merge", "split")
+SYNTHETIC_RERANKER_MIN_TOP1_GAIN = 0.03
 
 LAST_FINAL_EDGES: list[tuple[float, int, int]] = []
 
@@ -1470,6 +1475,265 @@ def oracle_reranker_diagnostic_main() -> None:
     )
 
 
+def synthetic_mode_probs(mode: str) -> tuple[float, float, float]:
+    if mode == "merge":
+        return 0.28, 0.06, 0.06
+    if mode == "split":
+        return 0.08, 0.24, 0.10
+    if mode == "shift":
+        return 0.08, 0.10, 0.24
+    return 0.14, 0.12, 0.12
+
+
+def make_synthetic_cipher_task(
+    base_ids: np.ndarray,
+    target_adapter,
+    mode: str,
+    seed: int,
+) -> tuple[np.ndarray, dict[int, list[int]], dict[int, str]]:
+    rng = np.random.default_rng(seed)
+    merge_p, split_p, shift_p = synthetic_mode_probs(mode)
+    pieces_by_text: dict[str, int] = {}
+    oracle_by_type: dict[int, list[int]] = {}
+    text_by_type: dict[int, str] = {}
+    type_sequence: list[int] = []
+
+    def add_piece(piece: str) -> None:
+        if piece == "":
+            return
+        token_type = pieces_by_text.get(piece)
+        if token_type is None:
+            token_type = len(pieces_by_text)
+            pieces_by_text[piece] = token_type
+            oracle_by_type[token_type] = target_adapter.encode(piece)
+            text_by_type[token_type] = piece
+        type_sequence.append(token_type)
+
+    i = 0
+    while i < len(base_ids):
+        piece = target_adapter.decode([int(base_ids[i])])
+        r = float(rng.random())
+        if r < merge_p and i + 1 < len(base_ids):
+            n = 3 if (mode == "merge" and rng.random() < 0.35 and i + 2 < len(base_ids)) else 2
+            add_piece(target_adapter.decode([int(x) for x in base_ids[i : i + n]]))
+            i += n
+            continue
+        if r < merge_p + split_p and len(piece) >= 4:
+            split_min = 1
+            split_max = len(piece) - 1
+            if split_min < split_max:
+                cut = int(rng.integers(split_min, split_max + 1))
+                add_piece(piece[:cut])
+                add_piece(piece[cut:])
+                i += 1
+                continue
+        if r < merge_p + split_p + shift_p and piece.startswith(" ") and len(piece) > 1:
+            if rng.random() < 0.5:
+                add_piece(" ")
+                add_piece(piece[1:])
+            else:
+                add_piece(piece[:2])
+                add_piece(piece[2:])
+            i += 1
+            continue
+        stripped = piece.strip()
+        if r < merge_p + split_p + shift_p and stripped and all(
+            (not ch.isalnum()) and (not ch.isspace()) for ch in stripped
+        ) and len(piece) > 1:
+            add_piece(piece[:-1])
+            add_piece(piece[-1])
+            i += 1
+            continue
+        add_piece(piece)
+        i += 1
+
+    type_count = len(pieces_by_text)
+    if type_count == 0:
+        return np.empty(0, dtype=np.uint32), {}, {}
+    if type_count > target_adapter.spec.vocab_size:
+        raise RuntimeError(f"synthetic type count {type_count} exceeds target vocab")
+    perm = rng.permutation(target_adapter.spec.vocab_size)[:type_count].astype(np.int64)
+    cipher_ids = perm[np.asarray(type_sequence, dtype=np.int64)].astype(np.uint32)
+    oracle_by_cipher = {int(perm[token_type]): oracle for token_type, oracle in oracle_by_type.items()}
+    text_by_cipher = {int(perm[token_type]): text for token_type, text in text_by_type.items()}
+    return cipher_ids, oracle_by_cipher, text_by_cipher
+
+
+def collect_synthetic_rerank_groups(
+    name: str,
+    cipher_ids: np.ndarray,
+    oracle_by_cipher: dict[int, list[int]],
+    ref_ids: np.ndarray,
+    target_adapter,
+    mapping: np.ndarray,
+) -> list[dict]:
+    c_counts = counts(cipher_ids, int(max(len(mapping), int(cipher_ids.max(initial=0)) + 1)))
+    p_counts = counts(ref_ids, target_adapter.spec.vocab_size)
+    c_focus = np.argsort(-c_counts)[:ORACLE_CANDIDATE_TOP_N].astype(np.int64)
+    c_focus_set = set(map(int, c_focus))
+    p_order = np.argsort(-p_counts)
+    p_rank = np.empty(target_adapter.spec.vocab_size, dtype=np.int64)
+    p_rank[p_order] = np.arange(target_adapter.spec.vocab_size)
+
+    candidates_by_c: dict[int, list[tuple[float, int]]] = {}
+    seen_by_c: dict[int, set[int]] = {}
+    for score, c, p in sorted(LAST_FINAL_EDGES, reverse=True):
+        c_int = int(c)
+        if c_int not in c_focus_set:
+            continue
+        bucket = candidates_by_c.setdefault(c_int, [])
+        if len(bucket) >= ORACLE_RERANKER_TOP_K:
+            continue
+        seen = seen_by_c.setdefault(c_int, set())
+        p_int = int(p)
+        if p_int in seen:
+            continue
+        seen.add(p_int)
+        bucket.append((float(score), p_int))
+
+    owner_of_p: dict[int, int] = {}
+    for c in c_focus:
+        c_int = int(c)
+        p_int = int(mapping[c_int])
+        if 0 <= p_int < target_adapter.spec.vocab_size and p_int not in owner_of_p:
+            owner_of_p[p_int] = c_int
+
+    decode_cache: dict[int, str] = {}
+
+    def target_piece(p: int) -> str:
+        cached = decode_cache.get(p)
+        if cached is None:
+            cached = target_adapter.decode([p])
+            decode_cache[p] = cached
+        return cached
+
+    groups: list[dict] = []
+    total_single_mass = 0.0
+    positive_mass = 0.0
+    current_correct_mass = 0.0
+    edge_top1_mass = 0.0
+    for c in c_focus:
+        c_int = int(c)
+        cand = candidates_by_c.get(c_int)
+        oracle_ids = oracle_by_cipher.get(c_int)
+        if not cand or oracle_ids is None or len(oracle_ids) != 1:
+            continue
+        oracle_p = int(oracle_ids[0])
+        weight = float(c_counts[c_int])
+        total_single_mass += weight
+        if int(mapping[c_int]) == oracle_p:
+            current_correct_mass += weight
+        if cand and cand[0][1] == oracle_p:
+            edge_top1_mass += weight
+
+        label_idx = -1
+        best_score = cand[0][0]
+        current_p = int(mapping[c_int])
+        current_rank = int(p_rank[current_p]) if 0 <= current_p < len(p_rank) else len(p_rank)
+        c_log = np.log(max(1.0, weight))
+        feats: list[list[float]] = []
+        candidate_ids: list[int] = []
+        for rank, (score, p) in enumerate(cand):
+            if p == oracle_p:
+                label_idx = rank
+            p_count = float(p_counts[p])
+            p_log = np.log(max(1.0, p_count))
+            rank_delta = abs(float(p_rank[p] - current_rank)) / max(1.0, float(len(p_rank)))
+            owner = owner_of_p.get(p)
+            piece = target_piece(p)
+            feats.append(
+                [
+                    float(score),
+                    float(score - best_score),
+                    float(rank),
+                    1.0 / float(rank + 1),
+                    c_log,
+                    p_log,
+                    abs(c_log - p_log),
+                    rank_delta,
+                    float(p == current_p),
+                    float(owner is not None and owner != c_int),
+                    float(p_count / max(1.0, float(len(ref_ids)))),
+                ]
+                + token_piece_features(piece)
+            )
+            candidate_ids.append(p)
+        if label_idx >= 0:
+            positive_mass += weight
+        groups.append(
+            {
+                "task": name,
+                "cipher": c_int,
+                "weight": weight,
+                "features": np.asarray(feats, dtype=np.float32),
+                "label": label_idx,
+                "candidate_ids": candidate_ids,
+                "oracle": oracle_p,
+                "current_correct": int(current_p == oracle_p),
+                "edge_top1_correct": int(cand[0][1] == oracle_p),
+            }
+        )
+    print(
+        f"synthetic_rerank_collect task={name} groups={len(groups)} single_mass={total_single_mass:.0f} "
+        f"top64_mass={positive_mass:.0f} current_top1={current_correct_mass / max(1.0, total_single_mass):.4f} "
+        f"edge_top1={edge_top1_mass / max(1.0, total_single_mass):.4f}",
+        flush=True,
+    )
+    return groups
+
+
+def synthetic_reranker_diagnostic_main() -> None:
+    task = load_task("qwen3_6_27b", TARGET_TOKENIZER, target_tokens=100_000, reference_tokens=REFERENCE_TOKENS, seed=SEED)
+    target_adapter = task.target_adapter
+    collected: dict[str, list[dict]] = {}
+    for idx, mode in enumerate(SYNTHETIC_RERANKER_TASKS):
+        base_start = idx * (SYNTHETIC_RERANKER_TOKENS + 50_000)
+        ref_start = 1_000_000 + idx * (SYNTHETIC_RERANKER_REF_TOKENS + 50_000)
+        base_ids = np.asarray(task.ref_ids[base_start : base_start + SYNTHETIC_RERANKER_TOKENS], dtype=np.uint32)
+        ref_ids = np.asarray(task.ref_ids[ref_start : ref_start + SYNTHETIC_RERANKER_REF_TOKENS], dtype=np.uint32)
+        if len(base_ids) < 10_000 or len(ref_ids) < 10_000:
+            raise RuntimeError("not enough cached reference ids for synthetic reranker diagnostic")
+        cipher_ids, oracle_by_cipher, _ = make_synthetic_cipher_task(
+            base_ids,
+            target_adapter,
+            mode,
+            seed=SEED + 1000 + idx,
+        )
+        print(
+            f"synthetic_reranker_task={mode} cipher_tokens={len(cipher_ids)} "
+            f"types={len(oracle_by_cipher)} ref_tokens={len(ref_ids)}",
+            flush=True,
+        )
+        mapping = align_shuffled(cipher_ids, ref_ids, target_adapter.spec.vocab_size)
+        collected[mode] = collect_synthetic_rerank_groups(mode, cipher_ids, oracle_by_cipher, ref_ids, target_adapter, mapping)
+
+    folds: dict[str, dict[str, float]] = {}
+    for test_name in SYNTHETIC_RERANKER_TASKS:
+        train_groups = [g for name, groups in collected.items() if name != test_name for g in groups]
+        test_groups = collected[test_name]
+        coef, mean, std = train_oracle_group_reranker(train_groups)
+        metrics = evaluate_oracle_group_reranker(test_groups, coef, mean, std)
+        folds[test_name] = metrics
+        print(f"synthetic_reranker_fold={test_name} {json.dumps(metrics, sort_keys=True)}", flush=True)
+
+    total_mass = sum(m["mass"] for m in folds.values())
+    aggregate = {
+        key: sum(m[key] * m["mass"] for m in folds.values()) / max(1.0, total_mass)
+        for key in ("coverage", "current_top1", "edge_top1", "rerank_top1", "changed_mass")
+    }
+    aggregate["mass"] = total_mass
+    aggregate["rerank_minus_current"] = aggregate["rerank_top1"] - aggregate["current_top1"]
+    aggregate["clears_threshold"] = float(aggregate["rerank_minus_current"] >= SYNTHETIC_RERANKER_MIN_TOP1_GAIN)
+    print(f"synthetic_reranker_aggregate: {json.dumps(aggregate, sort_keys=True)}", flush=True)
+
+    out_dir = CACHE_DIR / "runs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "synthetic_reranker_diagnostic.json").write_text(
+        json.dumps({"folds": folds, "aggregate": aggregate}, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
 def variable_emission_repair(
     cipher_ids: np.ndarray,
     ref_ids: np.ndarray,
@@ -2126,6 +2390,9 @@ def decode_with_string_lexicon(
 def main() -> None:
     if ORACLE_RERANKER_DIAGNOSTIC:
         oracle_reranker_diagnostic_main()
+        return
+    if SYNTHETIC_RERANKER_DIAGNOSTIC:
+        synthetic_reranker_diagnostic_main()
         return
 
     t0 = time.time()
