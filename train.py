@@ -86,6 +86,8 @@ TAIL_REPAIR_NODES = 2_048
 TAIL_REPAIR_CONTEXTS = 8_192
 TAIL_REPAIR_CANDIDATES = 8
 TAIL_REPAIR_MIN_GAIN_PER_OCC = 0.30
+TAIL_OWNER_CLOSED_REPAIR = True
+TAIL_OWNER_CLOSED_MIN_GAIN_PER_OCC = 0.30
 EXTERNAL_OWNER_REPAIR = True
 EXTERNAL_OWNER_MAX_TOKENS = 100_000
 EXTERNAL_OWNER_NODES = 2_048
@@ -749,6 +751,15 @@ def tail_unary_repair(
     repaired = mapping.copy()
     accepted = 0
     accepted_gain_per_occ: list[float] = []
+    owner_of_p: dict[int, int] = {}
+    for c in c_focus:
+        c_int = int(c)
+        p_int = int(mapping[c_int])
+        if 0 <= p_int < target_vocab_size and p_int not in owner_of_p:
+            owner_of_p[p_int] = c_int
+    tail_pos = {int(c): row for row, c in enumerate(tail_arr)}
+    swap_proposals: list[tuple[float, int, int, int, int]] = []
+    rejected_owner_conflicts = 0
     for row, c in enumerate(tail_arr):
         cand = candidates_by_c[int(c)]
         if len(cand) <= 1:
@@ -762,9 +773,50 @@ def tail_unary_repair(
         occ = max(1.0, float(c_counts[int(c)]))
         if best_local == current_local or gain / occ < TAIL_REPAIR_MIN_GAIN_PER_OCC:
             continue
-        repaired[int(c)] = cand[best_local]
+        best_p = int(cand[best_local])
+        current_p = int(cand[current_local])
+        if TAIL_OWNER_CLOSED_REPAIR:
+            owner_c = owner_of_p.get(best_p)
+            if owner_c is not None and owner_c != int(c):
+                owner_row = tail_pos.get(owner_c)
+                current_idx = candidate_pos.get(current_p)
+                best_idx = candidate_pos.get(best_p)
+                if owner_row is None or current_idx is None or best_idx is None:
+                    rejected_owner_conflicts += 1
+                    continue
+                old_score = float(score_np[row, current_idx] + score_np[owner_row, best_idx])
+                new_score = float(score_np[row, best_idx] + score_np[owner_row, current_idx])
+                swap_occ = max(1.0, float(c_counts[int(c)] + c_counts[owner_c]))
+                swap_gain = (new_score - old_score) / swap_occ
+                if swap_gain < TAIL_OWNER_CLOSED_MIN_GAIN_PER_OCC:
+                    rejected_owner_conflicts += 1
+                    continue
+                swap_proposals.append((swap_gain, int(c), owner_c, best_p, current_p))
+                continue
+        repaired[int(c)] = best_p
         accepted += 1
         accepted_gain_per_occ.append(gain / occ)
+    if TAIL_OWNER_CLOSED_REPAIR and swap_proposals:
+        swap_proposals.sort(reverse=True)
+        used_nodes: set[int] = set()
+        used_targets: set[int] = set()
+        swap_accepted = 0
+        for gain, c, owner_c, best_p, current_p in swap_proposals:
+            if c in used_nodes or owner_c in used_nodes or best_p in used_targets or current_p in used_targets:
+                continue
+            if int(repaired[c]) != current_p or int(repaired[owner_c]) != best_p:
+                continue
+            repaired[c] = best_p
+            repaired[owner_c] = current_p
+            used_nodes.update((c, owner_c))
+            used_targets.update((best_p, current_p))
+            accepted += 2
+            swap_accepted += 1
+            accepted_gain_per_occ.append(gain)
+        print(
+            f"tail_owner_closed_swaps={swap_accepted} rejected_conflicts={rejected_owner_conflicts}",
+            flush=True,
+        )
     print(f"tail_repair_nodes={len(tail_arr)} candidates={len(candidate_p_arr)} accepted={accepted}", flush=True)
     if accepted_gain_per_occ:
         gain_arr = np.asarray(accepted_gain_per_occ, dtype=np.float32)
