@@ -68,6 +68,9 @@ BIGRAM_REFINE_SKIP_WEIGHT = 0.4
 BIGRAM_REFINE_SKIP_MIN_TOKENS = 1_000_000
 BIGRAM_REFINE_SKIP_MAX_TOKENS = 1_000_000
 BIGRAM_REFINE_ALPHA = 0.05
+BIGRAM_FIXED_CONTEXT = True
+BIGRAM_FIXED_CONTEXT_TOKENS = 16_384
+BIGRAM_FIXED_CONTEXT_WEIGHT = 1.0
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -244,7 +247,96 @@ def dense_bigram_counts(ids: np.ndarray, nodes: np.ndarray, vocab_floor: int, of
     return np.bincount(flat, minlength=k * k).reshape(k, k).astype(np.float32)
 
 
-def bigram_swap_delta(c_big: np.ndarray, p_log: np.ndarray, perm: np.ndarray, a: int, b: int) -> float:
+def dense_cross_bigram_counts(
+    ids: np.ndarray,
+    left_nodes: np.ndarray,
+    right_nodes: np.ndarray,
+    vocab_floor: int,
+    offset: int = 1,
+) -> np.ndarray:
+    left_lookup = np.full(vocab_floor, -1, dtype=np.int32)
+    right_lookup = np.full(vocab_floor, -1, dtype=np.int32)
+    left_valid = left_nodes < vocab_floor
+    right_valid = right_nodes < vocab_floor
+    left_lookup[left_nodes[left_valid]] = np.arange(len(left_nodes), dtype=np.int32)[left_valid]
+    right_lookup[right_nodes[right_valid]] = np.arange(len(right_nodes), dtype=np.int32)[right_valid]
+    prev = left_lookup[ids[:-offset]]
+    nxt = right_lookup[ids[offset:]]
+    mask = (prev >= 0) & (nxt >= 0)
+    rows = len(left_nodes)
+    cols = len(right_nodes)
+    if not bool(mask.any()):
+        return np.zeros((rows, cols), dtype=np.float32)
+    flat = prev[mask].astype(np.int64, copy=False) * cols + nxt[mask].astype(np.int64, copy=False)
+    return np.bincount(flat, minlength=rows * cols).reshape(rows, cols).astype(np.float32)
+
+
+def fixed_context_scores(
+    cipher_ids: np.ndarray,
+    ref_ids: np.ndarray,
+    c_focus: np.ndarray,
+    c_nodes: np.ndarray,
+    p_nodes: np.ndarray,
+    mapping: np.ndarray,
+    target_vocab_size: int,
+) -> np.ndarray | None:
+    if not BIGRAM_FIXED_CONTEXT or BIGRAM_FIXED_CONTEXT_TOKENS <= 0:
+        return None
+    c_block = set(map(int, c_nodes))
+    p_seen = set(map(int, p_nodes))
+    context_c: list[int] = []
+    context_p: list[int] = []
+    for c in c_focus:
+        c_int = int(c)
+        if c_int in c_block:
+            continue
+        p_int = int(mapping[c_int])
+        if p_int < 0 or p_int >= target_vocab_size or p_int in p_seen:
+            continue
+        context_c.append(c_int)
+        context_p.append(p_int)
+        p_seen.add(p_int)
+        if len(context_c) >= BIGRAM_FIXED_CONTEXT_TOKENS:
+            break
+    if len(context_c) < 64:
+        return None
+
+    context_c_arr = np.asarray(context_c, dtype=np.int64)
+    context_p_arr = np.asarray(context_p, dtype=np.int64)
+    c_right = dense_cross_bigram_counts(cipher_ids, c_nodes, context_c_arr, len(mapping))
+    c_left = dense_cross_bigram_counts(cipher_ids, context_c_arr, c_nodes, len(mapping)).T
+    p_right = dense_cross_bigram_counts(ref_ids, p_nodes, context_p_arr, target_vocab_size)
+    p_left = dense_cross_bigram_counts(ref_ids, context_p_arr, p_nodes, target_vocab_size)
+    p_right_totals = p_right.sum(axis=1, keepdims=True)
+    p_left_totals = p_left.sum(axis=1, keepdims=True)
+    p_right_log = np.log(
+        (p_right + BIGRAM_REFINE_ALPHA) / (p_right_totals + BIGRAM_REFINE_ALPHA * len(context_p_arr))
+    ).astype(np.float32)
+    p_left_log = np.log(
+        (p_left + BIGRAM_REFINE_ALPHA) / (p_left_totals + BIGRAM_REFINE_ALPHA * len(p_nodes))
+    ).astype(np.float32)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    with torch.no_grad():
+        c_right_t = torch.as_tensor(c_right, dtype=torch.float32, device=device)
+        c_left_t = torch.as_tensor(c_left, dtype=torch.float32, device=device)
+        p_right_t = torch.as_tensor(p_right_log, dtype=torch.float32, device=device)
+        p_left_t = torch.as_tensor(p_left_log, dtype=torch.float32, device=device)
+        scores = c_right_t @ p_right_t.T
+        scores.add_(c_left_t @ p_left_t)
+        out = scores.cpu().numpy().astype(np.float32)
+    print(f"bigram_fixed_context_tokens={len(context_c_arr)}", flush=True)
+    print(f"bigram_fixed_context_weight={BIGRAM_FIXED_CONTEXT_WEIGHT}", flush=True)
+    return out
+
+
+def bigram_swap_delta(
+    c_big: np.ndarray,
+    p_log: np.ndarray,
+    perm: np.ndarray,
+    a: int,
+    b: int,
+    fixed_score: np.ndarray | None = None,
+) -> float:
     pa = int(perm[a])
     pb = int(perm[b])
     old = (
@@ -265,6 +357,13 @@ def bigram_swap_delta(c_big: np.ndarray, p_log: np.ndarray, perm: np.ndarray, a:
         for j in (a, b):
             old -= float(c_big[i, j] * p_log[int(perm[i]), int(perm[j])])
             new -= float(c_big[i, j] * p_log[int(new_perm[i]), int(new_perm[j])])
+    if fixed_score is not None:
+        old += BIGRAM_FIXED_CONTEXT_WEIGHT * (
+            float(fixed_score[a, int(perm[a])]) + float(fixed_score[b, int(perm[b])])
+        )
+        new += BIGRAM_FIXED_CONTEXT_WEIGHT * (
+            float(fixed_score[a, int(new_perm[a])]) + float(fixed_score[b, int(new_perm[b])])
+        )
     return new - old
 
 
@@ -310,6 +409,7 @@ def refine_with_bigram_objective(
         p_big += BIGRAM_REFINE_SKIP_WEIGHT * dense_bigram_counts(ref_ids, p_nodes, target_vocab_size, offset=2)
     row_totals = p_big.sum(axis=1, keepdims=True)
     p_log = np.log((p_big + BIGRAM_REFINE_ALPHA) / (row_totals + BIGRAM_REFINE_ALPHA * k)).astype(np.float32)
+    fixed_score = fixed_context_scores(cipher_ids, ref_ids, c_focus, c_nodes, p_nodes, mapping, target_vocab_size)
     perm = np.arange(k, dtype=np.int32)
     owner = np.arange(k, dtype=np.int32)
     c_to_i = {int(c): i for i, c in enumerate(c_nodes)}
@@ -344,7 +444,7 @@ def refine_with_bigram_objective(
             j = int(owner[p_idx])
             if i == j:
                 continue
-            delta = bigram_swap_delta(c_big, p_log, perm, i, j)
+            delta = bigram_swap_delta(c_big, p_log, perm, i, j, fixed_score)
             if delta <= 0.0:
                 continue
             pi = int(perm[i])
