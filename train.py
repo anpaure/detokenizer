@@ -73,6 +73,9 @@ BIGRAM_REFINE_ALPHA = 0.05
 BIGRAM_UNIGRAM_BACKOFF = True
 BIGRAM_UNIGRAM_BACKOFF_TAU = 1000.0
 BIGRAM_UNIGRAM_BACKOFF_MAX_TOKENS = 100_000
+BIGRAM_ADAPTIVE_BACKOFF = True
+BIGRAM_ADAPTIVE_BACKOFF_MIN_TAU = 300.0
+BIGRAM_ADAPTIVE_BACKOFF_MAX_TAU = 3000.0
 TAIL_REPAIR_MAX_TOKENS = 100_000
 TAIL_REPAIR_NODES = 1_024
 TAIL_REPAIR_CONTEXTS = 8_192
@@ -355,7 +358,18 @@ def refine_with_bigram_objective(
     if BIGRAM_UNIGRAM_BACKOFF and len(cipher_ids) <= BIGRAM_UNIGRAM_BACKOFF_MAX_TOKENS:
         unigram = p_counts[p_nodes].astype(np.float32)
         unigram = (unigram + BIGRAM_REFINE_ALPHA) / (float(unigram.sum()) + BIGRAM_REFINE_ALPHA * k)
-        lam = row_totals / (row_totals + BIGRAM_UNIGRAM_BACKOFF_TAU)
+        tau = BIGRAM_UNIGRAM_BACKOFF_TAU
+        if BIGRAM_ADAPTIVE_BACKOFF:
+            row_values = row_totals[:, 0]
+            positive = row_values[row_values > 0]
+            median_row = float(np.median(positive)) if len(positive) else 1.0
+            tau = BIGRAM_UNIGRAM_BACKOFF_TAU * np.sqrt(median_row / np.maximum(row_values, 1.0))
+            tau = np.clip(tau, BIGRAM_ADAPTIVE_BACKOFF_MIN_TAU, BIGRAM_ADAPTIVE_BACKOFF_MAX_TAU)[:, None]
+            print(
+                f"bigram_adaptive_backoff_tau_median={float(np.median(tau)):.3f}",
+                flush=True,
+            )
+        lam = row_totals / (row_totals + tau)
         block_probs = lam * block_probs + (1.0 - lam) * unigram[None, :]
         print(f"bigram_unigram_backoff_tau={BIGRAM_UNIGRAM_BACKOFF_TAU}", flush=True)
     p_log = np.log(block_probs).astype(np.float32)
