@@ -102,9 +102,9 @@ Evaluate serious changes on multiple tokenizer pairs and target scales:
   - `deepseek_v4_pro -> kimi_k2`
   - `qwen3_6_27b -> openai_o200k`
   - `mistral_medium_3_5 -> openai_o200k`
-  - `mimo_v2_5_pro -> openai_o200k`
-- optional hard/generalization pairs when time allows:
   - `gemma4_31b -> openai_o200k`
+- optional hard/generalization pairs when time allows:
+  - `mimo_v2_5_pro -> openai_o200k`
   - `openai_o200k -> kimi_k2`
   - `kimi_k2 -> qwen3_6_27b`
 

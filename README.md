@@ -83,7 +83,9 @@ Registered tokenizers:
 The hillclimb target is data-efficient recovery across tokenizers, not just one
 fixture. Serious changes should be evaluated at `100k`, `1m`, and `10m` target
 tokens across several tokenizer pairs. `program.md` defines the current core
-suite and the keep/discard rule.
+suite and the keep/discard rule. The core suite includes Gemma and keeps MiMo as
+an optional generalization pair because historical core-pair runs were highly
+correlated.
 
 ## Run One Experiment
 
