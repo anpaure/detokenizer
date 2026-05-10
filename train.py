@@ -59,7 +59,7 @@ def effective_candidate_window(num_cipher_tokens: int) -> int:
 
 
 def effective_rounds(num_cipher_tokens: int) -> int:
-    return 8 if num_cipher_tokens >= 1_000_000 else ROUNDS
+    return 8 if num_cipher_tokens >= 100_000 else ROUNDS
 
 
 def counts(ids: np.ndarray, size: int) -> np.ndarray:
