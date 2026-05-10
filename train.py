@@ -154,8 +154,12 @@ SYNTHETIC_RERANKER_TASKS = tuple(
     if item.strip()
 )
 SYNTHETIC_RERANKER_MIN_TOP1_GAIN = 0.03
+POST_REPAIR_EDGE_DIAGNOSTIC = os.environ.get("DETOK_POST_REPAIR_EDGE_DIAGNOSTIC", "0") == "1"
+POST_REPAIR_REFRESH_REPAIR = os.environ.get("DETOK_POST_REPAIR_REFRESH_REPAIR", "0") == "1"
 
 LAST_FINAL_EDGES: list[tuple[float, int, int]] = []
+LAST_PRE_REPAIR_EDGES: list[tuple[float, int, int]] = []
+LAST_POST_REPAIR_EDGES: list[tuple[float, int, int]] = []
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -315,6 +319,82 @@ def topk_edges(
                 if score <= -1.0e8:
                     continue
                 edges.append((float(score), int(c), int(p_focus[int(col)])))
+    return edges
+
+
+def build_context_edges_for_mapping(
+    cipher_ids: np.ndarray,
+    ref_ids: np.ndarray,
+    mapping: np.ndarray,
+    c_focus: np.ndarray,
+    p_focus: np.ndarray,
+    c_counts: np.ndarray,
+    p_counts: np.ndarray,
+    c_log: np.ndarray,
+    p_log: np.ndarray,
+    p_rank: np.ndarray,
+    anchor_rows: np.ndarray,
+    candidate_window: int,
+    use_skip_context: bool,
+    device: str,
+    label: str = "",
+) -> list[tuple[float, int, int]]:
+    c_anchors = c_focus[anchor_rows]
+    p_anchors = mapping[c_anchors]
+    with torch.no_grad():
+        c_left, c_right = torch_context_maps(cipher_ids, c_focus, c_anchors, device)
+        p_left, p_right = torch_context_maps(ref_ids, p_focus, p_anchors, device)
+        c_parts = [c_left, c_right]
+        p_parts = [p_left, p_right]
+        if use_skip_context:
+            c_left2, c_right2 = torch_context_maps(cipher_ids, c_focus, c_anchors, device, offset=2)
+            p_left2, p_right2 = torch_context_maps(ref_ids, p_focus, p_anchors, device, offset=2)
+            skip_weight = SKIP_CONTEXT_WEIGHT
+            if LEARN_SKIP_WEIGHT:
+                skip_weight = learn_skip_weight(
+                    c_left,
+                    c_right,
+                    c_left2,
+                    c_right2,
+                    p_left,
+                    p_right,
+                    p_left2,
+                    p_right2,
+                    anchor_rows,
+                    p_focus,
+                    p_anchors,
+                    device,
+                )
+                print(f"{label}learned_skip_weight: {skip_weight:.4f}", flush=True)
+            c_left2.mul_(skip_weight)
+            c_right2.mul_(skip_weight)
+            p_left2.mul_(skip_weight)
+            p_right2.mul_(skip_weight)
+            c_parts.extend([c_left2, c_right2])
+            p_parts.extend([p_left2, p_right2])
+        c_vec = normalize_features(torch.cat(c_parts, dim=1), c_counts[c_focus], device)
+        p_vec = normalize_features(torch.cat(p_parts, dim=1), p_counts[p_focus], device)
+        del c_parts, p_parts, c_left, c_right, p_left, p_right
+        if use_skip_context:
+            del c_left2, c_right2, p_left2, p_right2
+        edges = topk_edges(
+            c_vec,
+            p_vec,
+            c_focus,
+            p_focus,
+            c_log,
+            p_log,
+            mapping,
+            p_rank,
+            candidate_window,
+            device,
+        )
+        del c_vec, p_vec
+        if device == "cuda":
+            torch.cuda.empty_cache()
+
+    if len(cipher_ids) <= SINKHORN_MAX_TOKENS:
+        edges = sinkhorn_reweight_edges(edges, c_focus)
     return edges
 
 
@@ -947,7 +1027,10 @@ def align_shuffled(
     ref_ids: np.ndarray,
     target_vocab_size: int,
 ) -> np.ndarray:
-    global LAST_FINAL_EDGES
+    global LAST_FINAL_EDGES, LAST_PRE_REPAIR_EDGES, LAST_POST_REPAIR_EDGES
+    LAST_FINAL_EDGES = []
+    LAST_PRE_REPAIR_EDGES = []
+    LAST_POST_REPAIR_EDGES = []
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device: {device}", flush=True)
     candidate_window = effective_candidate_window(len(cipher_ids))
@@ -976,64 +1059,25 @@ def align_shuffled(
     anchor_rows = np.arange(min(ANCHORS, len(c_focus)), dtype=np.int64)
 
     for round_idx in range(rounds):
-        c_anchors = c_focus[anchor_rows]
-        p_anchors = mapping[c_anchors]
-        print(f"round {round_idx + 1}/{rounds}: focus={len(c_focus)} anchors={len(c_anchors)}", flush=True)
-        with torch.no_grad():
-            c_left, c_right = torch_context_maps(cipher_ids, c_focus, c_anchors, device)
-            p_left, p_right = torch_context_maps(ref_ids, p_focus, p_anchors, device)
-            c_parts = [c_left, c_right]
-            p_parts = [p_left, p_right]
-            if use_skip_context:
-                c_left2, c_right2 = torch_context_maps(cipher_ids, c_focus, c_anchors, device, offset=2)
-                p_left2, p_right2 = torch_context_maps(ref_ids, p_focus, p_anchors, device, offset=2)
-                skip_weight = SKIP_CONTEXT_WEIGHT
-                if LEARN_SKIP_WEIGHT:
-                    skip_weight = learn_skip_weight(
-                        c_left,
-                        c_right,
-                        c_left2,
-                        c_right2,
-                        p_left,
-                        p_right,
-                        p_left2,
-                        p_right2,
-                        anchor_rows,
-                        p_focus,
-                        p_anchors,
-                        device,
-                    )
-                    print(f"learned_skip_weight: {skip_weight:.4f}", flush=True)
-                c_left2.mul_(skip_weight)
-                c_right2.mul_(skip_weight)
-                p_left2.mul_(skip_weight)
-                p_right2.mul_(skip_weight)
-                c_parts.extend([c_left2, c_right2])
-                p_parts.extend([p_left2, p_right2])
-            c_vec = normalize_features(torch.cat(c_parts, dim=1), c_counts[c_focus], device)
-            p_vec = normalize_features(torch.cat(p_parts, dim=1), p_counts[p_focus], device)
-            del c_parts, p_parts, c_left, c_right, p_left, p_right
-            if use_skip_context:
-                del c_left2, c_right2, p_left2, p_right2
-            edges = topk_edges(
-                c_vec,
-                p_vec,
-                c_focus,
-                p_focus,
-                c_log,
-                p_log,
-                mapping,
-                p_rank,
-                candidate_window,
-                device,
-            )
-            del c_vec, p_vec
-            if device == "cuda":
-                torch.cuda.empty_cache()
-
-        if len(cipher_ids) <= SINKHORN_MAX_TOKENS:
-            edges = sinkhorn_reweight_edges(edges, c_focus)
+        print(f"round {round_idx + 1}/{rounds}: focus={len(c_focus)} anchors={len(anchor_rows)}", flush=True)
+        edges = build_context_edges_for_mapping(
+            cipher_ids,
+            ref_ids,
+            mapping,
+            c_focus,
+            p_focus,
+            c_counts,
+            p_counts,
+            c_log,
+            p_log,
+            p_rank,
+            anchor_rows,
+            candidate_window,
+            use_skip_context,
+            device,
+        )
         if round_idx == rounds - 1:
+            LAST_PRE_REPAIR_EDGES = list(edges)
             LAST_FINAL_EDGES = list(edges)
         edges.sort(reverse=True)
         used_c: set[int] = set()
@@ -1115,6 +1159,48 @@ def align_shuffled(
                 edges,
                 target_vocab_size,
             )
+            if POST_REPAIR_EDGE_DIAGNOSTIC or POST_REPAIR_REFRESH_REPAIR:
+                refreshed_edges = build_context_edges_for_mapping(
+                    cipher_ids,
+                    ref_ids,
+                    mapping,
+                    c_focus,
+                    p_focus,
+                    c_counts,
+                    p_counts,
+                    c_log,
+                    p_log,
+                    p_rank,
+                    anchor_rows,
+                    candidate_window,
+                    use_skip_context,
+                    device,
+                    label="post_repair_",
+                )
+                LAST_POST_REPAIR_EDGES = list(refreshed_edges)
+                print(f"post_repair_edges={len(refreshed_edges)}", flush=True)
+                if POST_REPAIR_REFRESH_REPAIR:
+                    refreshed_edges.sort(reverse=True)
+                    mapping = tail_unary_repair(
+                        cipher_ids,
+                        ref_ids,
+                        mapping,
+                        c_counts,
+                        p_counts,
+                        c_focus,
+                        refreshed_edges,
+                        target_vocab_size,
+                    )
+                    mapping = external_owner_repair(
+                        cipher_ids,
+                        ref_ids,
+                        mapping,
+                        c_counts,
+                        c_focus,
+                        refreshed_edges,
+                        target_vocab_size,
+                    )
+                    LAST_FINAL_EDGES = list(refreshed_edges)
         if use_dynamic_anchors and len(assigned_scores) >= 64:
             assigned_scores.sort(reverse=True)
             next_anchor_rows: list[int] = []
@@ -1167,7 +1253,14 @@ def error_breakdown(original: str, recovered: str, max_chars: int = 50_000) -> d
 
 
 def oracle_candidate_diagnostics(task, mapping: np.ndarray) -> dict[str, float]:
-    if not ORACLE_CANDIDATE_DIAGNOSTICS or not LAST_FINAL_EDGES:
+    edge_sets: list[tuple[str, list[tuple[float, int, int]]]] = []
+    if LAST_PRE_REPAIR_EDGES:
+        edge_sets.append(("pre", LAST_PRE_REPAIR_EDGES))
+    elif LAST_FINAL_EDGES:
+        edge_sets.append(("pre", LAST_FINAL_EDGES))
+    if LAST_POST_REPAIR_EDGES:
+        edge_sets.append(("post", LAST_POST_REPAIR_EDGES))
+    if not ORACLE_CANDIDATE_DIAGNOSTICS or not edge_sets:
         return {}
     c_counts = counts(task.cipher_ids, int(max(len(mapping), int(task.cipher_ids.max(initial=0)) + 1)))
     focus = np.argsort(-c_counts)[:ORACLE_CANDIDATE_TOP_N]
@@ -1178,18 +1271,26 @@ def oracle_candidate_diagnostics(task, mapping: np.ndarray) -> dict[str, float]:
         if c_int not in cipher_to_source:
             cipher_to_source[c_int] = int(source)
 
-    candidates_by_c: dict[int, list[int]] = {}
-    for score, c, p in sorted(LAST_FINAL_EDGES, reverse=True):
-        bucket = candidates_by_c.setdefault(int(c), [])
-        if len(bucket) >= max(ORACLE_CANDIDATE_KS):
-            continue
-        if int(p) not in bucket:
-            bucket.append(int(p))
+    candidates_by_label: dict[str, dict[int, list[int]]] = {}
+    for label, edges in edge_sets:
+        candidates_by_c: dict[int, list[int]] = {}
+        for score, c, p in sorted(edges, reverse=True):
+            bucket = candidates_by_c.setdefault(int(c), [])
+            if len(bucket) >= max(ORACLE_CANDIDATE_KS):
+                continue
+            if int(p) not in bucket:
+                bucket.append(int(p))
+        candidates_by_label[label] = candidates_by_c
 
+    topk_weight_by_label = {
+        label: {k: 0.0 for k in ORACLE_CANDIDATE_KS}
+        for label, _ in edge_sets
+    }
+    pre_topk_weight = topk_weight_by_label[edge_sets[0][0]]
+    post_topk_weight = topk_weight_by_label.get("post")
     total_weight = 0.0
     single_weight = 0.0
     mapped_weight = 0.0
-    topk_weight = {k: 0.0 for k in ORACLE_CANDIDATE_KS}
     mean_emission_len_num = 0.0
     for c in focus:
         c_int = int(c)
@@ -1207,12 +1308,13 @@ def oracle_candidate_diagnostics(task, mapping: np.ndarray) -> dict[str, float]:
             continue
         single_weight += weight
         oracle_p = int(target_piece[0])
-        cand = candidates_by_c.get(c_int, [])
         if int(mapping[c_int]) == oracle_p:
             mapped_weight += weight
-        for k in ORACLE_CANDIDATE_KS:
-            if oracle_p in cand[:k]:
-                topk_weight[k] += weight
+        for label, candidates_by_c in candidates_by_label.items():
+            cand = candidates_by_c.get(c_int, [])
+            for k in ORACLE_CANDIDATE_KS:
+                if oracle_p in cand[:k]:
+                    topk_weight_by_label[label][k] += weight
 
     if total_weight <= 0.0:
         return {}
@@ -1223,7 +1325,13 @@ def oracle_candidate_diagnostics(task, mapping: np.ndarray) -> dict[str, float]:
         "oracle_current_mapping_top1": mapped_weight / max(1.0, single_weight),
     }
     for k in ORACLE_CANDIDATE_KS:
-        metrics[f"oracle_edge_top{k}"] = topk_weight[k] / max(1.0, single_weight)
+        pre_value = pre_topk_weight[k] / max(1.0, single_weight)
+        metrics[f"oracle_edge_top{k}"] = pre_value
+        metrics[f"oracle_pre_edge_top{k}"] = pre_value
+        if post_topk_weight is not None:
+            post_value = post_topk_weight[k] / max(1.0, single_weight)
+            metrics[f"oracle_post_edge_top{k}"] = post_value
+            metrics[f"oracle_post_edge_top{k}_delta"] = post_value - pre_value
     print(f"oracle_candidate_diagnostics: {json.dumps(metrics, sort_keys=True)}", flush=True)
     return metrics
 
