@@ -125,3 +125,4 @@ cfb3e24	core-100k-gemma	0.458608	0.470260	2.664134	6.3	keep	recomputed core-100k
 cfb3e24	core-1m-gemma	0.277212	0.309580	2.748144	6.3	keep	recomputed core-1m with Gemma replacing redundant MiMo
 1651457	qwen36-o200k-1m-screen	0.243560	0.243560	2.681033	6.3	diagnostic	source-retokenized high-data path sharply improves hard 1m screen
 1651457	core-1m-gemma	0.233060	0.247960	2.685028	6.3	keep	source-retokenized high-data path improves every Gemma-core 1m pair
+1651457	qwen36-o200k-10m-screen	0.066140	0.066140	2.641562	6.3	diagnostic	source-retokenized high-data path sharply improves hard 10m screen
