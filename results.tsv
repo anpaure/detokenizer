@@ -114,3 +114,5 @@ cff784e	qwen36-o200k-100k-screen	0.489720	0.489720	2.762881	6.3	discard	first-or
 456c92a	core-100k	0.457956	0.465940	2.668062	6.3	keep	gated unigram-backoff smoothing tau 1000 improves low-data mean and max
 456c92a	qwen36-o200k-1m-guard	0.289770	0.296880	2.806948	6.3	diagnostic	gated backoff disabled above 100k; repeated 1m guards show non-causal run variance
 a08609d	core-100k	0.453876	0.461900	2.654633	6.3	keep	fixed-neighbor tail unary repair improves low-data mean and max after gated unigram backoff
+97a1814	qwen36-qwen36-100k-diagnostic	0.458060	0.458060	2.613550	6.3	diagnostic	source-retokenized reference did not improve low-data screen, pointing to assignment noise at 100k
+97a1814	qwen36-qwen36-1m-diagnostic	0.242780	0.242780	2.683163	6.3	diagnostic	source-retokenized reference sharply improved 1m, exposing cross-tokenizer one-token emission bottleneck
