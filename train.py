@@ -76,6 +76,12 @@ TAIL_REPAIR_NODES = 1_024
 TAIL_REPAIR_CONTEXTS = 8_192
 TAIL_REPAIR_CANDIDATES = 8
 TAIL_REPAIR_MIN_GAIN_PER_OCC = 0.15
+MIDROUND_BIGRAM_REPAIR = True
+MIDROUND_BIGRAM_MAX_TOKENS = 100_000
+MIDROUND_BIGRAM_AFTER_ROUND = 2
+MIDROUND_BIGRAM_TOKENS = 1_024
+MIDROUND_BIGRAM_MAX_PROPOSALS = 50_000
+MIDROUND_BIGRAM_PASSES = 1
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -308,10 +314,14 @@ def refine_with_bigram_objective(
     edges: list[tuple[float, int, int]],
     target_vocab_size: int,
     p_counts: np.ndarray,
+    token_budget_override: int | None = None,
+    max_proposals_override: int | None = None,
+    pass_budget_override: int | None = None,
+    label: str = "bigram_refine",
 ) -> np.ndarray:
     if not BIGRAM_OBJECTIVE_REFINE:
         return mapping
-    token_budget = (
+    token_budget = token_budget_override or (
         BIGRAM_REFINE_LARGE_TOKENS
         if BIGRAM_REFINE_LARGE_TOKEN_MIN_TOKENS <= len(cipher_ids) <= BIGRAM_REFINE_LARGE_TOKEN_MAX_TOKENS
         else BIGRAM_REFINE_TOKENS
@@ -333,9 +343,9 @@ def refine_with_bigram_objective(
         return mapping
 
     use_skip_refine = BIGRAM_REFINE_SKIP_MIN_TOKENS <= len(cipher_ids) <= BIGRAM_REFINE_SKIP_MAX_TOKENS
-    print(f"bigram_refine_token_budget={token_budget}", flush=True)
-    print(f"bigram_refine_tokens={k}", flush=True)
-    print(f"bigram_refine_skip={use_skip_refine}", flush=True)
+    print(f"{label}_token_budget={token_budget}", flush=True)
+    print(f"{label}_tokens={k}", flush=True)
+    print(f"{label}_skip={use_skip_refine}", flush=True)
     c_big = dense_bigram_counts(cipher_ids, c_nodes, len(mapping))
     p_big = dense_bigram_counts(ref_ids, p_nodes, target_vocab_size)
     if use_skip_refine:
@@ -348,7 +358,7 @@ def refine_with_bigram_objective(
         unigram = (unigram + BIGRAM_REFINE_ALPHA) / (float(unigram.sum()) + BIGRAM_REFINE_ALPHA * k)
         lam = row_totals / (row_totals + BIGRAM_UNIGRAM_BACKOFF_TAU)
         block_probs = lam * block_probs + (1.0 - lam) * unigram[None, :]
-        print(f"bigram_unigram_backoff_tau={BIGRAM_UNIGRAM_BACKOFF_TAU}", flush=True)
+        print(f"{label}_unigram_backoff_tau={BIGRAM_UNIGRAM_BACKOFF_TAU}", flush=True)
     p_log = np.log(block_probs).astype(np.float32)
     perm = np.arange(k, dtype=np.int32)
     owner = np.arange(k, dtype=np.int32)
@@ -367,12 +377,13 @@ def refine_with_bigram_objective(
             continue
         seen_proposals.add(key)
         proposals.append(key)
-        if len(proposals) >= BIGRAM_REFINE_MAX_PROPOSALS:
+        proposal_budget = max_proposals_override or BIGRAM_REFINE_MAX_PROPOSALS
+        if len(proposals) >= proposal_budget:
             break
 
     swaps = 0
     passes_run = 0
-    pass_budget = (
+    pass_budget = pass_budget_override or (
         BIGRAM_REFINE_LARGE_PASSES
         if BIGRAM_REFINE_LARGE_TOKEN_MIN_TOKENS <= len(cipher_ids) <= BIGRAM_REFINE_LARGE_TOKEN_MAX_TOKENS
         else BIGRAM_REFINE_PASSES
@@ -400,10 +411,10 @@ def refine_with_bigram_objective(
         refined = mapping.copy()
         refined[c_nodes] = p_nodes[perm]
         mapping = refined
-    print(f"bigram_refine_proposals={len(proposals)}", flush=True)
-    print(f"bigram_refine_pass_budget={pass_budget}", flush=True)
-    print(f"bigram_refine_passes={passes_run}", flush=True)
-    print(f"bigram_refine_swaps={swaps}", flush=True)
+    print(f"{label}_proposals={len(proposals)}", flush=True)
+    print(f"{label}_pass_budget={pass_budget}", flush=True)
+    print(f"{label}_passes={passes_run}", flush=True)
+    print(f"{label}_swaps={swaps}", flush=True)
     return mapping
 
 
@@ -647,6 +658,25 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
         for c, p in assigned_p_by_c.items():
             next_mapping[c] = p
         mapping = next_mapping
+        if (
+            MIDROUND_BIGRAM_REPAIR
+            and use_dynamic_anchors
+            and len(cipher_ids) <= MIDROUND_BIGRAM_MAX_TOKENS
+            and round_idx + 1 == MIDROUND_BIGRAM_AFTER_ROUND
+        ):
+            mapping = refine_with_bigram_objective(
+                cipher_ids,
+                ref_ids,
+                mapping,
+                c_focus,
+                edges,
+                target_vocab_size,
+                p_counts,
+                token_budget_override=MIDROUND_BIGRAM_TOKENS,
+                max_proposals_override=MIDROUND_BIGRAM_MAX_PROPOSALS,
+                pass_budget_override=MIDROUND_BIGRAM_PASSES,
+                label="mid_bigram_refine",
+            )
         if round_idx == rounds - 1 and (use_dynamic_anchors or BIGRAM_REFINE_ALL_SCALES):
             mapping = refine_with_bigram_objective(
                 cipher_ids,
