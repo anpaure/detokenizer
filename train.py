@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -95,7 +96,7 @@ VARIABLE_EMISSION_MIN_COUNT = 10
 VARIABLE_EMISSION_MIN_GAIN_PER_OCC = 5.00
 VARIABLE_EMISSION_MAX_ACCEPTED = 2
 VARIABLE_EMISSION_FREE_LOCAL_PAIRS = True
-STRING_LEXICON_REPAIR = True
+STRING_LEXICON_REPAIR = False
 STRING_LEXICON_MAX_TOKENS = 100_000
 STRING_LEXICON_NODES = 512
 STRING_LEXICON_BIGRAMS = 8_192
@@ -109,6 +110,18 @@ STRING_LEXICON_MIN_GAIN_PER_BYTE = 0.050
 STRING_LEXICON_MAX_ACCEPTED = 2
 STRING_LEXICON_ALLOW_EMPTY_SPLITS = False
 STRING_LEXICON_FORMAT_ONLY = True
+STRING_CANDIDATE_REPAIR = True
+STRING_CANDIDATE_MAX_TOKENS = 100_000
+STRING_CANDIDATE_NODES = 128
+STRING_CANDIDATE_REF_TOKENS = 8_192
+STRING_CANDIDATE_RAW_SPANS = 2_048
+STRING_CANDIDATE_SUBSTRINGS = 2_048
+STRING_CANDIDATE_MAX_PER_TOKEN = 32
+STRING_CANDIDATE_MAX_CONTEXTS = 512
+STRING_CANDIDATE_CONTEXT_RADIUS = 4
+STRING_CANDIDATE_MAX_CHARS = 24
+STRING_CANDIDATE_MIN_GAIN_PER_BYTE = 0.10
+STRING_CANDIDATE_MAX_ACCEPTED = 2
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -1352,6 +1365,207 @@ def string_lexicon_repair(
     return overrides
 
 
+def valid_piece_candidate(piece: str) -> bool:
+    if piece == "" or len(piece) > STRING_CANDIDATE_MAX_CHARS:
+        return False
+    if "\ufffd" in piece or "\x00" in piece:
+        return False
+    return all(ch.isprintable() or ch in "\n\r\t" for ch in piece)
+
+
+def candidate_class_compatible(base_label: str, cand_label: str) -> bool:
+    if cand_label in {"empty", "replacement"}:
+        return False
+    if base_label in {"newline", "whitespace", "punctuation"}:
+        return cand_label == base_label
+    if base_label == "alnum":
+        return cand_label in {"alnum", "mixed"}
+    if base_label == "mixed":
+        return cand_label in {"alnum", "mixed", "punctuation"}
+    return cand_label == base_label
+
+
+def build_string_candidate_inventory(
+    ref_ids: np.ndarray,
+    target_adapter,
+    reference_text: Path,
+) -> dict[str, list[str]]:
+    p_counts = counts(ref_ids, target_adapter.spec.vocab_size)
+    p_order = np.argsort(-p_counts)
+    raw_counts: dict[str, int] = {}
+
+    def add_piece(piece: str, weight: int = 1) -> None:
+        if not valid_piece_candidate(piece):
+            return
+        raw_counts[piece] = raw_counts.get(piece, 0) + weight
+
+    for p in p_order[:STRING_CANDIDATE_REF_TOKENS]:
+        piece = target_adapter.decode([int(p)])
+        add_piece(piece, int(p_counts[int(p)]))
+        if 2 <= len(piece) <= STRING_CANDIDATE_MAX_CHARS:
+            for width in range(2, min(12, len(piece)) + 1):
+                add_piece(piece[:width])
+                add_piece(piece[-width:])
+            stripped = piece.strip()
+            if stripped and stripped != piece:
+                add_piece(stripped)
+                add_piece(" " + stripped)
+
+    raw = reference_text.read_bytes()[:2_000_000].decode("utf-8", errors="ignore")
+    span_re = re.compile(r"\n+|\s+[A-Za-z]{1,20}|[A-Za-z]{2,20}|\s+\d{1,8}|\d{1,8}|\s*[.,;:!?()\[\]{}\"'`-]+")
+    for match in span_re.finditer(raw):
+        add_piece(match.group(0))
+
+    ranked = sorted(raw_counts.items(), key=lambda kv: (-kv[1], len(kv[0]), kv[0]))
+    inventory: dict[str, list[str]] = {}
+    substring_budget = 0
+    raw_budget = 0
+    for piece, _ in ranked:
+        label = classify_piece(piece)
+        if piece in raw:
+            raw_budget += 1
+            if raw_budget > STRING_CANDIDATE_RAW_SPANS + STRING_CANDIDATE_SUBSTRINGS:
+                continue
+        else:
+            substring_budget += 1
+            if substring_budget > STRING_CANDIDATE_SUBSTRINGS:
+                continue
+        bucket = inventory.setdefault(label, [])
+        if len(bucket) < STRING_CANDIDATE_RAW_SPANS:
+            bucket.append(piece)
+    return inventory
+
+
+def string_candidate_repair(
+    cipher_ids: np.ndarray,
+    ref_ids: np.ndarray,
+    mapping: np.ndarray,
+    emissions: dict[int, tuple[int, ...]],
+    target_adapter,
+    byte_lm,
+    reference_text: Path,
+) -> dict[int, str]:
+    if not STRING_CANDIDATE_REPAIR or len(cipher_ids) > STRING_CANDIDATE_MAX_TOKENS:
+        return {}
+
+    vocab_floor = int(max(len(mapping), int(cipher_ids.max(initial=0)) + 1))
+    c_counts = counts(cipher_ids, vocab_floor)
+    c_order = np.argsort(-c_counts)
+    repair_nodes = [int(c) for c in c_order[:STRING_CANDIDATE_NODES] if c_counts[int(c)] > 0]
+    if len(repair_nodes) < 32:
+        return {}
+
+    inventory = build_string_candidate_inventory(ref_ids, target_adapter, reference_text)
+    piece_cache: dict[int, str] = {}
+    positions_by_c: dict[int, list[int]] = {int(c): [] for c in repair_nodes}
+    for pos, c in enumerate(cipher_ids):
+        c_int = int(c)
+        bucket = positions_by_c.get(c_int)
+        if bucket is not None and len(bucket) < STRING_CANDIDATE_MAX_CONTEXTS:
+            bucket.append(pos)
+
+    def render_window(start: int, stop: int, override_c: int | None = None, override_piece: str | None = None) -> str:
+        parts: list[str] = []
+        for tok in cipher_ids[start:stop]:
+            tok_int = int(tok)
+            if override_c is not None and tok_int == override_c and override_piece is not None:
+                parts.append(override_piece)
+            else:
+                parts.append(piece_for_cipher(tok_int, mapping, emissions, target_adapter, piece_cache))
+        return "".join(parts)
+
+    proposals: list[tuple[float, int, str, str, int]] = []
+    candidate_count = 0
+    for c in repair_nodes:
+        base_piece = piece_for_cipher(c, mapping, emissions, target_adapter, piece_cache)
+        base_label = classify_piece(base_piece)
+        local_candidates: list[str] = []
+        seen: set[str] = {base_piece}
+        for label, pieces in inventory.items():
+            if not candidate_class_compatible(base_label, label):
+                continue
+            for piece in pieces:
+                if piece in seen:
+                    continue
+                if abs(len(piece) - len(base_piece)) > 8:
+                    continue
+                seen.add(piece)
+                local_candidates.append(piece)
+                if len(local_candidates) >= STRING_CANDIDATE_MAX_PER_TOKEN:
+                    break
+            if len(local_candidates) >= STRING_CANDIDATE_MAX_PER_TOKEN:
+                break
+        if not local_candidates:
+            continue
+        candidate_count += len(local_candidates)
+
+        windows: set[tuple[int, int]] = set()
+        for pos in positions_by_c.get(c, []):
+            start = max(0, pos - STRING_CANDIDATE_CONTEXT_RADIUS)
+            stop = min(len(cipher_ids), pos + STRING_CANDIDATE_CONTEXT_RADIUS + 1)
+            windows.add((start, stop))
+        if not windows:
+            continue
+        old_bits = 0.0
+        old_bytes = 0
+        rendered_old: dict[tuple[int, int], str] = {}
+        for start, stop in windows:
+            text = render_window(start, stop)
+            rendered_old[(start, stop)] = text
+            bits, nbytes = lm_total_bits(byte_lm, text)
+            old_bits += bits
+            old_bytes += nbytes
+        if old_bytes <= 0:
+            continue
+
+        best_piece: str | None = None
+        best_gain = 0.0
+        for candidate in local_candidates:
+            new_bits = 0.0
+            new_bytes = 0
+            for start, stop in windows:
+                text = render_window(start, stop, c, candidate)
+                bits, nbytes = lm_total_bits(byte_lm, text)
+                new_bits += bits
+                new_bytes += nbytes
+            if new_bytes <= 0:
+                continue
+            # Normalize by the new byte count so deletions/insertions must still
+            # improve the actual byte-level objective, not just shorten text.
+            gain_per_byte = (old_bits - new_bits) / new_bytes
+            if gain_per_byte > best_gain:
+                best_gain = gain_per_byte
+                best_piece = candidate
+        if best_piece is not None and best_gain >= STRING_CANDIDATE_MIN_GAIN_PER_BYTE:
+            proposals.append((best_gain, c, best_piece, base_piece, int(c_counts[c])))
+
+    proposals.sort(reverse=True)
+    overrides: dict[int, str] = {}
+    for gain, c, piece, _, _ in proposals[:STRING_CANDIDATE_MAX_ACCEPTED]:
+        overrides[c] = piece
+
+    print(
+        f"string_candidate_nodes={len(repair_nodes)} inventory={sum(len(v) for v in inventory.values())} "
+        f"candidates={candidate_count} proposals={len(proposals)} accepted={len(overrides)}",
+        flush=True,
+    )
+    if proposals:
+        gains = np.asarray([p[0] for p in proposals], dtype=np.float32)
+        print(f"string_candidate_gain_per_byte_median={float(np.median(gains)):.6f}", flush=True)
+        print(f"string_candidate_gain_per_byte_p90={float(np.percentile(gains, 90)):.6f}", flush=True)
+    if overrides:
+        classes: dict[str, int] = {}
+        duplicates = len(overrides) - len(set(overrides.values()))
+        for piece in overrides.values():
+            label = classify_piece(piece)
+            classes[label] = classes.get(label, 0) + 1
+        print(
+            f"string_candidate_classes={json.dumps(classes, sort_keys=True)} duplicate_pieces={duplicates}",
+            flush=True,
+        )
+    return overrides
+
+
 def decode_with_variable_emissions(
     cipher_ids: np.ndarray,
     mapping: np.ndarray,
@@ -1415,6 +1629,16 @@ def main() -> None:
         task.target_adapter,
         task.byte_lm,
     )
+    candidate_overrides = string_candidate_repair(
+        task.cipher_ids,
+        task.ref_ids,
+        mapping,
+        emissions,
+        task.target_adapter,
+        task.byte_lm,
+        task.reference_text,
+    )
+    string_overrides.update(candidate_overrides)
     recovered_sample = decode_with_string_lexicon(
         task.cipher_ids[:SAMPLE_TOKENS],
         mapping,
@@ -1454,6 +1678,8 @@ def main() -> None:
         "variable_emissions": len(emissions),
         "string_lexicon_repair": STRING_LEXICON_REPAIR,
         "string_lexicon_overrides": len(string_overrides),
+        "string_candidate_repair": STRING_CANDIDATE_REPAIR,
+        "string_candidate_overrides": len(candidate_overrides),
         "string_lexicon_classes": {
             label: sum(1 for piece in string_overrides.values() if classify_piece(piece) == label)
             for label in sorted({classify_piece(piece) for piece in string_overrides.values()})
