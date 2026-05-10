@@ -54,6 +54,7 @@ LEARN_WEIGHT_LR = 0.2
 LEARN_WEIGHT_TEMP = 0.07
 DYNAMIC_ANCHOR_MAX_TOKENS = 100_000
 ENABLE_DYNAMIC_ASSIGNMENT_SWAPS = True
+ASSIGNMENT_SWAP_MIN_GAIN = 0.01
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -335,7 +336,7 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
                     continue
                 current_score = assigned_score_by_c[c]
                 other_current_score = assigned_score_by_c[other_c]
-                if score + other_new_score <= current_score + other_current_score:
+                if score + other_new_score <= current_score + other_current_score + ASSIGNMENT_SWAP_MIN_GAIN:
                     continue
                 assigned_p_by_c[c] = p
                 assigned_p_by_c[other_c] = current_p
