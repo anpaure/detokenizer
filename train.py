@@ -93,9 +93,9 @@ def torch_context_maps(ids: np.ndarray, focus: np.ndarray, anchors: np.ndarray, 
     return left_flat.view(len(focus), len(anchors)), right_flat.view(len(focus), len(anchors))
 
 
-def normalize_features(x, token_counts: np.ndarray, device: str):
-    counts_t = torch.as_tensor(np.maximum(1.0, token_counts.astype(np.float32)), dtype=torch.float32, device=device)
-    y = x / torch.sqrt(counts_t)[:, None]
+def normalize_features(x, feature_counts: np.ndarray, device: str):
+    counts_t = torch.as_tensor(np.maximum(1.0, feature_counts.astype(np.float32)), dtype=torch.float32, device=device)
+    y = x / torch.sqrt(counts_t)[None, :]
     norm = torch.linalg.vector_norm(y, dim=1).clamp_min(1e-12)
     return y / norm[:, None]
 
@@ -162,8 +162,10 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
         with torch.no_grad():
             c_left, c_right = torch_context_maps(cipher_ids, c_focus, c_anchors, device)
             p_left, p_right = torch_context_maps(ref_ids, p_focus, p_anchors, device)
-            c_vec = normalize_features(torch.cat([c_left, c_right], dim=1), c_counts[c_focus], device)
-            p_vec = normalize_features(torch.cat([p_left, p_right], dim=1), p_counts[p_focus], device)
+            c_feature_counts = np.concatenate([c_counts[c_anchors], c_counts[c_anchors]])
+            p_feature_counts = np.concatenate([p_counts[p_anchors], p_counts[p_anchors]])
+            c_vec = normalize_features(torch.cat([c_left, c_right], dim=1), c_feature_counts, device)
+            p_vec = normalize_features(torch.cat([p_left, p_right], dim=1), p_feature_counts, device)
             del c_left, c_right, p_left, p_right
             edges = topk_edges(c_vec, p_vec, c_focus, p_focus, c_log, p_log, mapping, p_rank, device)
             del c_vec, p_vec
