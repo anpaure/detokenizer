@@ -1,23 +1,31 @@
-.DS_Store
+# Python-generated files
 __pycache__/
-*.py[cod]
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
 
-.venv/
-.venv*/
-.python-version
+# Virtual environments
+.venv
+worktrees/
+results/
+queue/
 
-.cache/
-.hf/
-zoo_eval/
+# Agent prompt files (generated per-session by launchers)
+CLAUDE.md
+AGENTS.md
+
+# Experimental code/artifacts
+dev/
+
+# Large/generated experiment outputs
+run.log
+*.log
 *.npy
 *.npz
-*.parquet
 *.txt
-*.report.json
-*.mapping.npy
+*.json
 
-results*.json
-
-# Old exploratory scripts not part of the published minimal harness.
-detokenizer_attack.py
-neural_mlm_refine.py
+# Local cache is outside the repo by default, but keep this ignored for ad hoc runs.
+.cache/

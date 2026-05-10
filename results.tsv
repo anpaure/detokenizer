@@ -1,0 +1,111 @@
+commit	suite	mean_cer50k	max_cer50k	mean_bpb	memory_gb	status	description
+06af84f	core-100k	0.551740	0.557220	2.748573	0.0	keep	baseline 100k core suite
+903d585	core-100k	0.550788	0.562360	2.752018	0.0	discard	4096 anchors low-data test
+2e6d825	core-100k-partial	0.659920	0.659920	2.943443	0.0	discard	anchor-frequency feature weighting failed first task
+385f611	core-100k-partial	0.559280	0.569140	2.730945	0.0	discard	freq_weight_0.20 worsened first three tasks
+6a3d697	core-100k	0.552256	0.564280	2.757979	0.0	discard	torch_topk_128
+641eac5	core-100k	0.552060	0.556600	2.767469	0.0	discard	adaptive anchors for oversized cipher vocab
+e2a4926	core-1m	0.345124	0.461960	2.776078	0.0	keep	baseline 1m core suite
+8b2e813	core-1m	0.344772	0.458500	2.777553	0.0	keep	candidate_window_25000
+8b2e813	core-100k	0.553000	0.560480	2.762561	0.0	discard	candidate_window_25000
+9077a93	core-100k	0.551616	0.557120	2.747418	0.0	keep	scale-aware candidate window
+9077a93	core-1m	0.341820	0.456800	2.775005	0.0	keep	scale-aware candidate window
+01a094e	core-1m	0.341848	0.457560	2.774485	0.0	discard	large_sample_window_20000
+7f416c1	core-10m-3pair	0.190540	0.323740	2.770602	0.0	keep	scale-aware candidate window validation
+6523b60	core-1m	0.340460	0.449860	2.771441	0.0	keep	eight_refinement_rounds
+6523b60	core-100k	0.551052	0.558380	2.747563	0.0	discard	eight_refinement_rounds
+9de6b0b	core-100k	0.551484	0.557740	2.749035	0.0	keep	final scale-aware window and rounds
+9de6b0b	core-1m	0.340636	0.451700	2.770393	0.0	keep	final scale-aware window and rounds
+9de6b0b	core-10m-3pair	0.188973	0.319040	2.769936	0.0	keep	final scale-aware window and rounds
+32b9e89	qwen36-o200k-1m-screen	0.451900	0.451900	2.939339	70.3	discard	75k focus worsened hard 1m screen
+11153b6	core-1m	0.341584	0.448920	2.775690	5.2	discard	include current mapping edge
+88813bc	qwen36-o200k-1m-screen	0.452220	0.452220	2.929311	62.7	discard	late rounds narrowed to 10k window
+e03980e	qwen36-o200k-1m-screen	0.454620	0.454620	2.873175	62.1	discard	freq weight 0.08 worsened hard 1m screen
+01fd299	core-1m	0.324816	0.439740	2.749101	6.3	keep	skip distance-2 context features for large samples
+01fd299	core-100k	0.551288	0.557560	2.748111	2.9	keep	skip context refactor guard at small scale
+01fd299	core-10m-3pair	0.167713	0.290940	2.738764	4.3	keep	skip distance-2 context features for large samples
+c1f8856	core-1m	0.310860	0.421220	2.756402	6.4	keep	full weight distance-2 context
+c1f8856	core-10m-3pair	0.160420	0.277780	2.761510	4.2	keep	full weight distance-2 context
+c1f8856	core-100k	0.551568	0.557140	2.748163	2.9	keep	full skip weight small-scale guard; skip inactive
+285cc18	qwen36-o200k-1m-screen	0.424100	0.424100	2.916292	92.2	discard	distance-3 context worsened hard 1m screen
+c740b36	core-1m	0.290864	0.314460	2.746880	6.3	keep	learn skip-context weight from anchor pairs
+c740b36	core-10m-3pair	0.106620	0.124060	2.704377	4.2	keep	learn skip-context weight from anchor pairs
+c740b36	core-100k	0.551400	0.557040	2.748119	2.9	keep	learned skip weight small-scale guard; skip inactive
+5e49120	qwen36-o200k-1m-screen	0.327580	0.327580	2.795305	77.7	discard	separate left/right learned skip weights worsened hard 1m screen
+afb027d	qwen36-o200k-1m-screen	0.322220	0.322220	2.790944	77.4	discard	1024 pseudo-label anchors worsened learned scalar hard 1m screen
+2a9cf71	qwen36-o200k-1m-screen	0.353180	0.353180	2.822023	102.1	discard	16k anchors worsened hard 1m screen
+c740b36	refine	0.000000	0.000000	0.000000	0.0	refine	[REFINE] context/anchor capacity attempts failed; shift to assignment stability
+2ca835c	qwen36-o200k-1m-screen	0.790460	0.790460	3.251264	107.7	discard	sparse auction assignment failed to converge; too few focus tokens assigned
+c740b36	pivot	0.000000	0.000000	0.000000	0.0	pivot	[PIVOT] abandon context/assignment micro-tuning; run broader generalization diagnosis before next approach
+12bcb1c	optional-1m-3pair	0.299073	0.324780	2.770461	5.1	diagnostic	optional generalization after learned skip-weight pivot
+8129bd3	qwen36-o200k-1m-screen	0.483120	0.483120	2.968977	76.9	discard	learned frequency penalty over-penalized rank mismatch and worsened hard 1m screen
+b347529	core-100k	0.511912	0.530960	2.678429	3.4	keep	enable learned skip context at 100k
+b347529	core-1m	0.292092	0.318980	2.736630	6.3	keep	enable learned skip context at 100k; 1m guard
+ac4a774	core-100k	0.513796	0.531600	2.673658	3.4	discard	eight rounds at 100k worsened learned skip-context
+f29d664	core-100k	0.512716	0.528300	2.690059	3.4	discard	wide candidate window at 100k improved max but worsened mean
+37a7f48	core-100k	0.498820	0.509100	2.699833	3.4	keep	dynamic anchor refresh improves low-data alignment
+37a7f48	core-1m	0.299716	0.319160	2.764450	6.3	discard	dynamic anchor refresh regressed 1m guard
+a94c494	core-100k	0.498820	0.509100	2.699833	3.4	keep	gate dynamic anchor refresh to 100k
+a94c494	core-1m-2pair-guard	0.290810	0.314460	2.767646	6.3	keep	1m gate guard; dynamic anchors disabled
+0b42801	core-100k	0.500644	0.514460	2.705482	3.4	discard	wide candidate window worsened dynamic-anchor 100k suite
+b87425b	core-100k	0.499752	0.510060	2.695778	3.4	discard	assignment-margin anchor refresh worsened low-data suite
+a9cccf1	core-100k	0.501332	0.515600	2.699121	3.4	discard	freezing dynamic anchors after early rounds worsened low-data suite
+a94c494	refine	0.000000	0.000000	0.000000	0.0	refine	[REFINE] anchor/window micro-tuning failed after dynamic-anchor keep; switch approach
+37268b7	core-100k-partial	0.684080	0.693820	3.046751	3.4	discard	context IDF weighting destabilized anchor features
+060210c	core-100k	0.498456	0.504880	2.701119	3.4	discard	learned dynamic block weights marginally improved mean but added disproportionate complexity
+ca51268	core-100k	0.500752	0.513560	2.713282	3.4	discard	static left-context downweighting regressed low-data suite
+a94c494	refine	0.000000	0.000000	0.000000	0.0	refine	[REFINE] representation and distilled block-weight ideas failed; switch away from feature weighting
+b27393c	core-100k	0.495868	0.513460	2.699210	3.4	discard	assignment swap repair improved mean but regressed max hard pair
+4fd8a2d	core-100k	0.495560	0.508240	2.693902	3.4	keep	thresholded assignment swap repair improves low-data mean and max without hard-pair regression
+9082ac1	core-100k	0.496196	0.509880	2.699334	3.4	discard	stricter swap margin helped easy pairs but regressed hard-pair max and suite mean
+752710d	core-100k	0.494888	0.511820	2.697248	3.4	discard	midpoint swap margin improved mean but overfit easy pairs and regressed hard-pair max
+49527c8	qwen36-o200k-100k-screen	0.526680	0.526680	2.777552	3.4	discard	static high-frequency anchor prefix destabilized hard-pair dynamic anchors
+4fd8a2d	refine	0.000000	0.000000	0.000000	0.0	refine	[REFINE] swap-margin and anchor-stabilization probes failed on hard-pair max; switch approach
+ad71276	core-100k	0.498080	0.507940	2.636862	3.4	discard	byte-LM local reranker improved max and fluency but overrepaired Mistral/MiMo and worsened mean
+4fd8a2d	pivot	0.000000	0.000000	0.000000	0.0	pivot	[PIVOT] abandon edge-score and output-fluency local repairs; try direct token-bigram objective refinement
+4171fec	core-100k	0.484740	0.497800	2.692682	3.4	keep	direct token-bigram objective refinement improves low-data mean and max across tokenizer pairs
+440cba8	qwen36-o200k-100k-screen	0.500140	0.500140	2.784340	3.4	discard	wider 4096-token bigram refinement block worsened hard-pair screen
+73905eb	core-100k	0.479844	0.490300	2.688271	3.4	keep	50k direct-bigram swap proposals further improve low-data mean and max
+a4a247e	core-100k	0.474732	0.480620	2.681050	3.4	keep	100k direct-bigram swap proposals improve all low-data tokenizer pairs
+64dcb88	core-100k	0.465648	0.474900	2.673762	3.4	keep	two direct-bigram refinement passes improve every low-data tokenizer pair
+bba0e66	core-100k	0.463248	0.471760	2.672595	3.4	keep	third direct-bigram refinement pass improves aggregate and hard-pair max despite one easy-pair regression
+19feac4	core-100k	0.460496	0.467580	2.671482	3.4	keep	four direct-bigram refinement passes improve every low-data tokenizer pair over the third pass
+a1977d5	qwen36-o200k-100k-screen	0.468960	0.468960	2.746824	3.4	discard	five direct-bigram refinement passes regressed the hard-pair screen after pass four
+36ab470	qwen36-o200k-100k-screen	0.468220	0.468220	2.741726	3.4	discard	smoother bigram objective improved BPB but worsened hard-pair CER
+5710c11	qwen36-o200k-100k-screen	0.478980	0.478980	2.742367	3.4	discard	sharper bigram objective destabilized hard-pair refinement
+19feac4	refine	0.000000	0.000000	0.000000	0.0	refine	[REFINE] pass-count and alpha tuning hit overfit boundary; switch to direct-delta-prioritized swap ordering
+8f2860f	qwen36-o200k-100k-screen	0.474960	0.474960	2.743384	3.4	discard	delta-prioritized swap ordering reduced objective churn but worsened hard-pair CER
+19feac4	pivot	0.000000	0.000000	0.000000	0.0	pivot	[PIVOT] abandon final bigram-swap microtuning; try hashed trigram anchor-pair context before assignment
+a57d4ee	qwen36-o200k-100k-screen	0.480100	0.480100	2.721834	3.4	discard	hashed anchor-pair context improved fluency but worsened hard-pair CER
+eaf4be4	qwen36-o200k-100k-screen	0.480160	0.480160	2.779653	3.4	discard	CSLS edge scoring worsened hard-pair matching and BPB
+1b9c5c9	qwen36-o200k-1m-screen	0.321480	0.321480	2.789186	6.3	diagnostic	current hard-pair 1m baseline before all-scale bigram refinement
+2fdf74b	qwen36-o200k-1m-screen	0.293620	0.293620	2.765885	6.3	diagnostic	all-scale bigram refinement substantially improves hard-pair 1m screen
+2fdf74b	core-1m	0.282488	0.299160	2.734456	6.3	keep	all-scale direct bigram refinement improves 1m mean and max while preserving 100k path
+2fdf74b	core-10m-3pair	0.103953	0.127500	2.693489	6.3	keep	all-scale direct bigram refinement improves 10m mean with small Qwen max regression
+9cd3868	core-10m-3pair	0.103960	0.127380	2.694628	6.3	discard	two bigram passes at 10m slightly improved max but worsened mean and BPB
+c9312dc	core-1m	0.275664	0.288920	2.730760	6.3	keep	4096-token high-data bigram refinement improves every 1m core pair
+c9312dc	core-10m-3pair	0.106133	0.126820	2.697274	6.3	discard	4096-token high-data block regressed 10m mean despite slight Qwen max improvement
+a14628b	core-10m-3pair	0.103947	0.126820	2.693194	6.3	keep	gating 4096-token block to 1m restores 10m mean and keeps improved max
+1225617	qwen36-o200k-1m-screen	0.276460	0.276460	2.764855	6.3	diagnostic	8192-token 1m block improves hard-pair screen but increases runtime
+1225617	core-1m	0.271432	0.290740	2.730577	6.3	keep	8192-token 1m block improves mean but slightly regresses Mistral max and runtime
+77ff8c2	core-1m	0.272864	0.289960	2.728054	6.3	discard	6144-token 1m block improved runtime and max but lost too much mean CER versus 8192
+c3f7be2	qwen36-o200k-1m-screen	0.278440	0.278440	2.763351	6.3	discard	12288-token 1m block worsened hard-pair screen and runtime versus 8192
+233d7f8	qwen36-o200k-1m-screen	0.285280	0.285280	2.834013	6.3	discard	200k 1m bigram proposals overfit hard-pair local search and worsened BPB
+1225617	refine	0.000000	0.000000	0.000000	0.0	refine	[REFINE] wider/proposal-heavy 1m local search overfit; switch to 1m pass-budget regularization
+c3b4157	core-1m	0.270288	0.289900	2.730837	6.3	keep	three 1m bigram passes improve mean max and runtime versus four passes
+4602cfc	qwen36-o200k-1m-screen	0.292420	0.292420	2.850592	6.3	discard	two 1m bigram passes underfit hard-pair local search versus three passes
+b8d9837	qwen36-o200k-1m-screen	0.288100	0.288100	2.767622	6.3	discard	held-out pass validation split starved 1m bigram counts and worsened hard-pair CER
+587459a	core-1m	0.269164	0.288460	2.729890	6.3	keep	mixing distance-2 bigrams into 1m refinement improves mean max and BPB
+470dc88	qwen36-o200k-1m-screen	0.298920	0.298920	2.846321	6.3	discard	full-weight skip bigrams overpowered adjacent objective and worsened hard-pair 1m
+fe9e07d	core-1m	0.270004	0.288520	2.729153	6.3	discard	quarter-weight skip bigrams improved BPB but lost mean CER versus half weight
+782324a	qwen36-o200k-1m-screen	0.275800	0.275800	2.766078	6.3	diagnostic	0.4 skip-bigram weight improves Qwen screen slightly; full suite not yet run
+0052f5c	core-1m	0.267432	0.282240	2.730158	6.3	keep	0.4 skip-bigram weight improves 1m mean and max versus accepted half-weight setting
+bc026aa	qwen36-o200k-1m-screen	0.280800	0.280800	2.763993	6.3	discard	fixed-context bigram swap objective worsened hard 1m screen
+bc026aa	core-100k	0.472880	0.482900	2.665038	6.3	discard	fixed-context bigram swap objective worsened low-data suite despite broader neighbor evidence
+df95811	core-100k	0.472496	0.480200	2.677089	6.3	discard	repair-closure node selection overfit proposed swaps and worsened low-data suite
+ad25bf4	qwen36-o200k-1m-screen	0.280060	0.280060	2.757568	6.3	discard	final-only no-rank wide repair proposals worsened hard 1m screen
+ad25bf4	qwen36-o200k-100k-screen	0.468580	0.468580	2.743575	6.3	discard	final-only no-rank wide repair proposals worsened hard low-data screen
+0052f5c	refine	0.000000	0.000000	0.000000	0.0	refine	[REFINE] fixed-context closure and wide proposals all overfit; shift to conservative swap regularization and smoothing
+cff784e	qwen36-o200k-1m-screen	0.300500	0.300500	2.785068	6.3	discard	first-order edge regularization blocked useful swaps and worsened hard 1m screen
+cff784e	qwen36-o200k-100k-screen	0.489720	0.489720	2.762881	6.3	discard	first-order edge regularization badly underfit low-data hard screen
+3bdb91c	qwen36-o200k-100k-screen	0.476540	0.476540	2.743618	6.3	discard	unigram-backoff smoothing tau 100 worsened hard low-data screen
