@@ -159,3 +159,4 @@ de84781	qwen-mistral-gemma-100k-screen	0.457500	0.464960	2.665664	118.3	discard	
 5e4485c	qwen-mistral-gemma-100k-screen	0.460133	0.465940	2.666824	101.0	discard	format-only string boundary gate preserves Qwen gain but badly overfits Mistral and Gemma
 24a71cb	qwen36-o200k-100k-screen	0.449500	0.449500	2.690143	145.2	diagnostic	string candidate replacement from known-token substrings and raw spans improves hard Qwen but needs suite check
 24a71cb	qwen-mistral-gemma-100k-screen	0.460953	0.468660	2.667396	145.5	discard	string candidate inventory helps Qwen but overfits Mistral and loses suite badly
+c12cfb8	qwen36-o200k-100k-screen	0.459980	0.459980	2.688194	101.0	discard	Sinkhorn/OT soft edge reweighting over top 2048 source tokens destabilized hard Qwen assignment
