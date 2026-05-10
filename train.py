@@ -53,7 +53,6 @@ LEARN_WEIGHT_STEPS = 12
 LEARN_WEIGHT_LR = 0.2
 LEARN_WEIGHT_TEMP = 0.07
 DYNAMIC_ANCHOR_MAX_TOKENS = 100_000
-CONTEXT_IDF_POWER = 0.5
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -120,17 +119,6 @@ def normalize_features(x, token_counts: np.ndarray, device: str):
     norm = torch.linalg.vector_norm(x, dim=1).clamp_min(1e-12)
     x.div_(norm[:, None])
     return x
-
-
-def apply_anchor_idf(left, right, token_counts: np.ndarray, anchors: np.ndarray, device: str) -> None:
-    counts_t = torch.as_tensor(
-        np.maximum(1.0, token_counts[anchors].astype(np.float32)),
-        dtype=torch.float32,
-        device=device,
-    )
-    weights = counts_t.pow(-CONTEXT_IDF_POWER)
-    left.mul_(weights[None, :])
-    right.mul_(weights[None, :])
 
 
 def learn_skip_weight(
@@ -262,15 +250,11 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
         with torch.no_grad():
             c_left, c_right = torch_context_maps(cipher_ids, c_focus, c_anchors, device)
             p_left, p_right = torch_context_maps(ref_ids, p_focus, p_anchors, device)
-            apply_anchor_idf(c_left, c_right, c_counts, c_anchors, device)
-            apply_anchor_idf(p_left, p_right, p_counts, p_anchors, device)
             c_parts = [c_left, c_right]
             p_parts = [p_left, p_right]
             if use_skip_context:
                 c_left2, c_right2 = torch_context_maps(cipher_ids, c_focus, c_anchors, device, offset=2)
                 p_left2, p_right2 = torch_context_maps(ref_ids, p_focus, p_anchors, device, offset=2)
-                apply_anchor_idf(c_left2, c_right2, c_counts, c_anchors, device)
-                apply_anchor_idf(p_left2, p_right2, p_counts, p_anchors, device)
                 skip_weight = SKIP_CONTEXT_WEIGHT
                 if LEARN_SKIP_WEIGHT:
                     skip_weight = learn_skip_weight(
@@ -383,7 +367,6 @@ def main() -> None:
         "torch_topk": TORCH_TOPK,
         "skip_context": len(task.cipher_ids) >= SKIP_CONTEXT_MIN_TOKENS,
         "dynamic_anchors": len(task.cipher_ids) <= DYNAMIC_ANCHOR_MAX_TOKENS,
-        "context_idf_power": CONTEXT_IDF_POWER,
         "skip_context_weight": SKIP_CONTEXT_WEIGHT,
         "learn_skip_weight": LEARN_SKIP_WEIGHT,
         "elapsed_seconds": time.time() - t0,
