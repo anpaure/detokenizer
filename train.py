@@ -68,8 +68,6 @@ BIGRAM_REFINE_SKIP_WEIGHT = 0.4
 BIGRAM_REFINE_SKIP_MIN_TOKENS = 1_000_000
 BIGRAM_REFINE_SKIP_MAX_TOKENS = 1_000_000
 BIGRAM_REFINE_ALPHA = 0.05
-BIGRAM_EDGE_REGULARIZATION = True
-BIGRAM_EDGE_REG_MARGIN = 0.05
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -319,14 +317,11 @@ def refine_with_bigram_objective(
 
     proposals: list[tuple[int, int]] = []
     seen_proposals: set[tuple[int, int]] = set()
-    edge_score = np.full((k, k), -np.inf, dtype=np.float32) if BIGRAM_EDGE_REGULARIZATION else None
-    for score, c, p in edges:
+    for _, c, p in edges:
         i = c_to_i.get(c)
         p_idx = p_to_i.get(p)
         if i is None or p_idx is None:
             continue
-        if edge_score is not None:
-            edge_score[i, p_idx] = max(edge_score[i, p_idx], np.float32(score))
         key = (i, p_idx)
         if key in seen_proposals:
             continue
@@ -334,13 +329,6 @@ def refine_with_bigram_objective(
         proposals.append(key)
         if len(proposals) >= BIGRAM_REFINE_MAX_PROPOSALS:
             break
-    edge_floor = None
-    if edge_score is not None:
-        finite = np.isfinite(edge_score)
-        row_min = np.zeros(k, dtype=np.float32)
-        finite_rows = finite.any(axis=1)
-        row_min[finite_rows] = np.nanmin(np.where(finite[finite_rows], edge_score[finite_rows], np.nan), axis=1)
-        edge_floor = (row_min - BIGRAM_EDGE_REG_MARGIN).astype(np.float32)
 
     swaps = 0
     passes_run = 0
@@ -356,15 +344,6 @@ def refine_with_bigram_objective(
             j = int(owner[p_idx])
             if i == j:
                 continue
-            if edge_score is not None and edge_floor is not None:
-                pi = int(perm[i])
-                pj = int(perm[j])
-                si_new = float(edge_score[i, pj]) if np.isfinite(edge_score[i, pj]) else float(edge_floor[i])
-                sj_new = float(edge_score[j, pi]) if np.isfinite(edge_score[j, pi]) else float(edge_floor[j])
-                si_old = float(edge_score[i, pi]) if np.isfinite(edge_score[i, pi]) else float(edge_floor[i])
-                sj_old = float(edge_score[j, pj]) if np.isfinite(edge_score[j, pj]) else float(edge_floor[j])
-                if si_new + sj_new < si_old + sj_old - BIGRAM_EDGE_REG_MARGIN:
-                    continue
             delta = bigram_swap_delta(c_big, p_log, perm, i, j)
             if delta <= 0.0:
                 continue
