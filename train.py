@@ -53,7 +53,6 @@ LEARN_WEIGHT_STEPS = 12
 LEARN_WEIGHT_LR = 0.2
 LEARN_WEIGHT_TEMP = 0.07
 DYNAMIC_ANCHOR_MAX_TOKENS = 100_000
-DYNAMIC_ANCHOR_STATIC_PREFIX = 1_024
 ENABLE_DYNAMIC_ASSIGNMENT_SWAPS = True
 ASSIGNMENT_SWAP_MIN_GAIN = 0.01
 
@@ -355,9 +354,8 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
         mapping = next_mapping
         if use_dynamic_anchors and len(assigned_scores) >= 64:
             assigned_scores.sort(reverse=True)
-            static_count = min(DYNAMIC_ANCHOR_STATIC_PREFIX, ANCHORS, len(c_focus))
-            next_anchor_rows: list[int] = list(range(static_count))
-            seen_rows: set[int] = set(next_anchor_rows)
+            next_anchor_rows: list[int] = []
+            seen_rows: set[int] = set()
             for _, c in assigned_scores:
                 row = c_focus_pos.get(int(c))
                 if row is None or row in seen_rows:
