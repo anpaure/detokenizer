@@ -156,3 +156,4 @@ retok-audit	qwen36-o200k-100k-retok-move-audit	0.451460	0.451460	2.694996	6.3	di
 retok-batch	qwen36-o200k-100k-batch-signal-audit	0.451460	0.451460	2.694996	6.3	diagnostic	batch-level retok score is strongly informative: AUC 0.775802, corr with CER delta 0.888872, top-decile good fraction 0.972222
 retok-batch	qwen36-o200k-100k-cem-search	0.448660	0.448660	2.687478	6.3	discard	CEM batch search improved hard screen by 0.002800 but missed material gate of 0.446500, so no suite run
 retok-batch	qwen36-o200k-100k-cem-selected-audit	0.448660	0.448660	2.687478	6.3	diagnostic	CEM selected 7/32 oracle-good moves; good-only selected gain was 0.001640, but best 32 oracle-good moves in CEM pool reached 0.446040
+retok-elite	qwen36-o200k-100k-elite-filter	0.456840	0.456840	2.684250	6.3	discard	elite-posterior ablation/prefix filtering lowered retok objective but worsened CER; selected precision fell to 10/76 oracle-good moves

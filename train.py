@@ -69,6 +69,13 @@ RETOK_CEM_ENTROPY_FLOOR = float(os.environ.get("DETOK_RETOK_CEM_ENTROPY_FLOOR", 
 RETOK_CEM_GRAPH_RANK_PENALTY = float(os.environ.get("DETOK_RETOK_CEM_GRAPH_RANK_PENALTY", "0.0005"))
 RETOK_CEM_DUP_PENALTY = float(os.environ.get("DETOK_RETOK_CEM_DUP_PENALTY", "0.0"))
 RETOK_CEM_LEN_PENALTY = float(os.environ.get("DETOK_RETOK_CEM_LEN_PENALTY", "0.01"))
+RETOK_ELITE_FILTER = os.environ.get("DETOK_RETOK_ELITE_FILTER", "0") == "1"
+RETOK_ELITE_GLOBAL_FRAC = float(os.environ.get("DETOK_RETOK_ELITE_GLOBAL_FRAC", "0.10"))
+RETOK_ELITE_TOP_PER_ROUND = int(os.environ.get("DETOK_RETOK_ELITE_TOP_PER_ROUND", "4"))
+RETOK_ELITE_ABLATION_MOVES = int(os.environ.get("DETOK_RETOK_ELITE_ABLATION_MOVES", "96"))
+RETOK_ELITE_ABLATION_SAMPLES = int(os.environ.get("DETOK_RETOK_ELITE_ABLATION_SAMPLES", "6"))
+RETOK_ELITE_PREFIX_MOVES = int(os.environ.get("DETOK_RETOK_ELITE_PREFIX_MOVES", "128"))
+RETOK_ELITE_ADDBACK_MOVES = int(os.environ.get("DETOK_RETOK_ELITE_ADDBACK_MOVES", "64"))
 
 TOP_TOKENS = 50_000
 ANCHORS = 8_192
@@ -1988,6 +1995,310 @@ def score_cem_overrides(
     return objective, details
 
 
+def cem_objective_with_rank_penalty(
+    task,
+    sample_cipher: np.ndarray,
+    mapping: np.ndarray,
+    emissions: dict[int, tuple[int, ...]],
+    lm: SparseTokenBigramLM,
+    baseline_chars: int,
+    owner_of_target: dict[int, int],
+    overrides: dict[int, int],
+    move_by_key: dict[tuple[int, int], dict[str, float | int]],
+) -> tuple[float, dict[str, float | int]]:
+    objective, details = score_cem_overrides(
+        task,
+        sample_cipher,
+        mapping,
+        emissions,
+        lm,
+        baseline_chars,
+        owner_of_target,
+        overrides,
+    )
+    ranks = [float(move_by_key[(int(c), int(p))]["rank"]) for c, p in overrides.items() if (int(c), int(p)) in move_by_key]
+    avg_rank = float(np.mean(ranks)) if ranks else 0.0
+    objective += RETOK_CEM_GRAPH_RANK_PENALTY * (avg_rank / max(1.0, float(RETOK_CEM_TOPK)))
+    details["objective"] = float(objective)
+    details["avg_rank"] = avg_rank
+    return float(objective), details
+
+
+def select_elite_samples(
+    samples: list[tuple[float, dict[int, int], list[int], dict[str, float | int], int]],
+) -> list[tuple[float, dict[int, int], list[int], dict[str, float | int], int]]:
+    if not samples:
+        return []
+    sorted_samples = sorted(samples, key=lambda item: item[0])
+    elite_count = max(1, int(np.ceil(RETOK_ELITE_GLOBAL_FRAC * len(sorted_samples))))
+    selected: dict[int, tuple[float, dict[int, int], list[int], dict[str, float | int], int]] = {
+        id(item): item for item in sorted_samples[:elite_count]
+    }
+    by_round: dict[int, list[tuple[float, dict[int, int], list[int], dict[str, float | int], int]]] = {}
+    for item in sorted_samples:
+        by_round.setdefault(int(item[4]), []).append(item)
+    for round_samples in by_round.values():
+        for item in round_samples[:RETOK_ELITE_TOP_PER_ROUND]:
+            selected[id(item)] = item
+    return list(selected.values())
+
+
+def elite_move_statistics(
+    pool: list[dict[str, float | int]],
+    all_samples: list[tuple[float, dict[int, int], list[int], dict[str, float | int], int]],
+    elites: list[tuple[float, dict[int, int], list[int], dict[str, float | int], int]],
+) -> list[dict[str, float | int]]:
+    n_all = max(1, len(all_samples))
+    n_elite = max(1, len(elites))
+    elite_ids = {id(item) for item in elites}
+    move_stats: list[dict[str, float | int]] = []
+    eps = 0.5
+    for idx, move in enumerate(pool):
+        elite_contains = 0
+        nonelite_contains = 0
+        elite_objectives: list[float] = []
+        for sample in all_samples:
+            contains = idx in sample[2]
+            if not contains:
+                continue
+            if id(sample) in elite_ids:
+                elite_contains += 1
+                elite_objectives.append(float(sample[0]))
+            else:
+                nonelite_contains += 1
+        nonelite_total = max(1, n_all - n_elite)
+        enrichment = np.log((elite_contains + eps) / (n_elite - elite_contains + eps)) - np.log(
+            (nonelite_contains + eps) / (nonelite_total - nonelite_contains + eps)
+        )
+        move_stats.append(
+            {
+                "idx": int(idx),
+                "c": int(move["c"]),
+                "p": int(move["p"]),
+                "rank": int(move["rank"]),
+                "prior_score": float(move.get("prior_score", 0.0)),
+                "elite_frequency": float(elite_contains / n_elite),
+                "nonelite_frequency": float(nonelite_contains / nonelite_total),
+                "elite_enrichment": float(enrichment),
+                "mean_elite_objective": float(np.mean(elite_objectives)) if elite_objectives else 999.0,
+                "ablation_support": 0.0,
+            }
+        )
+    move_stats.sort(
+        key=lambda row: (
+            float(row["elite_enrichment"]),
+            float(row["elite_frequency"]),
+            float(row["prior_score"]),
+            -float(row["rank"]),
+        ),
+        reverse=True,
+    )
+    return move_stats
+
+
+def add_ablation_support(
+    task,
+    sample_cipher: np.ndarray,
+    mapping: np.ndarray,
+    emissions: dict[int, tuple[int, ...]],
+    lm: SparseTokenBigramLM,
+    baseline_chars: int,
+    owner_of_target: dict[int, int],
+    move_by_key: dict[tuple[int, int], dict[str, float | int]],
+    all_samples: list[tuple[float, dict[int, int], list[int], dict[str, float | int], int]],
+    elites: list[tuple[float, dict[int, int], list[int], dict[str, float | int], int]],
+    move_stats: list[dict[str, float | int]],
+) -> None:
+    elite_ids = {id(item) for item in elites}
+    for row in move_stats[:RETOK_ELITE_ABLATION_MOVES]:
+        idx = int(row["idx"])
+        supports: list[float] = []
+        containing = [sample for sample in all_samples if id(sample) in elite_ids and idx in sample[2]]
+        containing = sorted(containing, key=lambda item: item[0])[:RETOK_ELITE_ABLATION_SAMPLES]
+        for objective, overrides, _indices, _details, _round in containing:
+            c = int(row["c"])
+            if c not in overrides:
+                continue
+            ablated = dict(overrides)
+            ablated.pop(c, None)
+            ablated_objective, _ = cem_objective_with_rank_penalty(
+                task,
+                sample_cipher,
+                mapping,
+                emissions,
+                lm,
+                baseline_chars,
+                owner_of_target,
+                ablated,
+                move_by_key,
+            )
+            supports.append(float(ablated_objective - objective))
+        if supports:
+            row["ablation_support"] = float(np.median(np.asarray(supports, dtype=np.float64)))
+
+
+def elite_prefix_finalizer(
+    task,
+    sample_cipher: np.ndarray,
+    mapping: np.ndarray,
+    emissions: dict[int, tuple[int, ...]],
+    lm: SparseTokenBigramLM,
+    baseline_chars: int,
+    owner_of_target: dict[int, int],
+    pool: list[dict[str, float | int]],
+    all_samples: list[tuple[float, dict[int, int], list[int], dict[str, float | int], int]],
+    baseline_objective: float,
+) -> tuple[dict[int, int], dict[str, object]]:
+    elites = select_elite_samples(all_samples)
+    if not elites:
+        return {}, {}
+    move_by_key = {(int(move["c"]), int(move["p"])): move for move in pool}
+    move_stats = elite_move_statistics(pool, all_samples, elites)
+    add_ablation_support(
+        task,
+        sample_cipher,
+        mapping,
+        emissions,
+        lm,
+        baseline_chars,
+        owner_of_target,
+        move_by_key,
+        all_samples,
+        elites,
+        move_stats,
+    )
+    ranked = sorted(
+        move_stats,
+        key=lambda row: (
+            float(row["ablation_support"]),
+            float(row["elite_enrichment"]),
+            float(row["elite_frequency"]),
+            float(row["prior_score"]),
+            -float(row["rank"]),
+        ),
+        reverse=True,
+    )
+
+    selected: dict[int, int] = {}
+    best_overrides: dict[int, int] = {}
+    best_objective = baseline_objective
+    best_details: dict[str, float | int] = {}
+    prefix_rows: list[dict[str, float | int]] = []
+    for row in ranked[:RETOK_ELITE_PREFIX_MOVES]:
+        c = int(row["c"])
+        p = int(row["p"])
+        if c in selected:
+            continue
+        selected[c] = p
+        objective, details = cem_objective_with_rank_penalty(
+            task,
+            sample_cipher,
+            mapping,
+            emissions,
+            lm,
+            baseline_chars,
+            owner_of_target,
+            selected,
+            move_by_key,
+        )
+        prefix_rows.append(
+            {
+                "moves": int(len(selected)),
+                "objective": float(objective),
+                "target_conflicts": int(details["target_conflicts"]),
+                "length_delta": int(details["length_delta"]),
+            }
+        )
+        if objective < best_objective:
+            best_objective = float(objective)
+            best_overrides = dict(selected)
+            best_details = dict(details)
+
+    selected = dict(best_overrides)
+    prune_removed = 0
+    improved = True
+    while improved and selected:
+        improved = False
+        for c in list(selected.keys()):
+            trial = dict(selected)
+            trial.pop(c, None)
+            objective, details = cem_objective_with_rank_penalty(
+                task,
+                sample_cipher,
+                mapping,
+                emissions,
+                lm,
+                baseline_chars,
+                owner_of_target,
+                trial,
+                move_by_key,
+            )
+            if objective < best_objective:
+                selected = trial
+                best_objective = float(objective)
+                best_details = dict(details)
+                prune_removed += 1
+                improved = True
+                break
+
+    used_p = set(map(int, selected.values()))
+    addback_added = 0
+    for row in ranked[:RETOK_ELITE_ADDBACK_MOVES]:
+        c = int(row["c"])
+        p = int(row["p"])
+        if c in selected or p in used_p:
+            continue
+        trial = dict(selected)
+        trial[c] = p
+        objective, details = cem_objective_with_rank_penalty(
+            task,
+            sample_cipher,
+            mapping,
+            emissions,
+            lm,
+            baseline_chars,
+            owner_of_target,
+            trial,
+            move_by_key,
+        )
+        if objective < best_objective:
+            selected = trial
+            used_p.add(p)
+            best_objective = float(objective)
+            best_details = dict(details)
+            addback_added += 1
+
+    report = {
+        "elite_samples": int(len(elites)),
+        "all_samples": int(len(all_samples)),
+        "ranked_moves": int(len(ranked)),
+        "selected_moves": int(len(selected)),
+        "best_objective": float(best_objective),
+        "best_details": best_details,
+        "prune_removed": int(prune_removed),
+        "addback_added": int(addback_added),
+        "top_ranked_moves": [
+            {
+                "c": int(row["c"]),
+                "p": int(row["p"]),
+                "rank": int(row["rank"]),
+                "elite_frequency": float(row["elite_frequency"]),
+                "elite_enrichment": float(row["elite_enrichment"]),
+                "ablation_support": float(row["ablation_support"]),
+                "prior_score": float(row["prior_score"]),
+            }
+            for row in ranked[:10]
+        ],
+        "prefix_rows": prefix_rows[:20],
+    }
+    print(
+        "retok_elite_filter_summary:",
+        json.dumps({k: v for k, v in report.items() if k not in {"top_ranked_moves", "prefix_rows"}}, sort_keys=True),
+        flush=True,
+    )
+    return selected, report
+
+
 def selected_cem_move_oracle_audit(
     task,
     sample_cipher: np.ndarray,
@@ -2125,9 +2436,10 @@ def retok_cem_search(
     best_details = dict(baseline_details)
     round_reports: list[dict[str, float | int]] = []
     elite_n = max(1, int(round(RETOK_CEM_SAMPLES * RETOK_CEM_ELITE_FRAC)))
+    all_samples: list[tuple[float, dict[int, int], list[int], dict[str, float | int], int]] = []
 
     for round_idx in range(RETOK_CEM_ROUNDS):
-        samples: list[tuple[float, dict[int, int], list[int], dict[str, float | int]]] = []
+        samples: list[tuple[float, dict[int, int], list[int], dict[str, float | int], int]] = []
         for _ in range(RETOK_CEM_SAMPLES):
             chosen = sample_weighted_cem_batch(pool, weights, rng, RETOK_CEM_BATCH_MOVES)
             if not chosen:
@@ -2148,13 +2460,15 @@ def retok_cem_search(
             details["objective"] = objective
             details["avg_rank"] = avg_rank
             indices = [pool.index(move) for move in chosen]
-            samples.append((objective, overrides, indices, details))
+            sample_record = (objective, overrides, indices, details, round_idx + 1)
+            samples.append(sample_record)
+            all_samples.append(sample_record)
         if not samples:
             break
         samples.sort(key=lambda item: item[0])
         elites = samples[:elite_n]
         counts_elite = np.zeros(len(pool), dtype=np.float64)
-        for _objective, _overrides, indices, _details in elites:
+        for _objective, _overrides, indices, _details, _round in elites:
             counts_elite[indices] += 1.0
         elite_weights = counts_elite + RETOK_CEM_ENTROPY_FLOOR
         weights = (1.0 - RETOK_CEM_UPDATE_RATE) * weights + RETOK_CEM_UPDATE_RATE * elite_weights
@@ -2200,6 +2514,33 @@ def retok_cem_search(
         "best_details": best_details,
         "accepted": bool(best_overrides),
     }
+    if RETOK_ELITE_FILTER and all_samples:
+        elite_overrides, elite_report = elite_prefix_finalizer(
+            task,
+            sample_cipher,
+            mapping,
+            emissions,
+            lm,
+            baseline_chars,
+            owner_of_target,
+            pool,
+            all_samples,
+            baseline_objective,
+        )
+        report["elite_filter"] = elite_report
+        if elite_overrides:
+            elite_objective = float(elite_report.get("best_objective", baseline_objective))
+            if elite_objective < best_objective:
+                best_overrides = dict(elite_overrides)
+                best_objective = elite_objective
+                best_details = dict(elite_report.get("best_details", {}))
+                report["best_source"] = "elite_filter"
+            else:
+                report["best_source"] = "cem_sample"
+        else:
+            report["best_source"] = "cem_sample"
+    else:
+        report["best_source"] = "cem_sample"
     if not best_overrides:
         print("retok_cem_no_objective_improvement", flush=True)
         return mapping, emissions, report
