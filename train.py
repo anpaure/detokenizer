@@ -8,8 +8,11 @@ cer50k.
 
 from __future__ import annotations
 
+from collections import Counter, defaultdict
 import json
+import math
 import os
+import re
 import time
 from pathlib import Path
 
@@ -36,6 +39,15 @@ TARGET_TOKENS = int(os.environ.get("DETOK_TARGET_TOKENS", DEFAULT_TARGET_TOKENS)
 REFERENCE_TOKENS = int(os.environ.get("DETOK_REFERENCE_TOKENS", DEFAULT_REFERENCE_TOKENS))
 SAMPLE_TOKENS = int(os.environ.get("DETOK_SAMPLE_TOKENS", DEFAULT_SAMPLE_TOKENS))
 SEED = int(os.environ.get("DETOK_SEED", DEFAULT_SEED))
+ALGEBRAIC_PSEUDOWORD = os.environ.get("DETOK_ALGEBRAIC_PSEUDOWORD", "0") == "1"
+ALGEBRAIC_START_TOKENS = int(os.environ.get("DETOK_ALGEBRAIC_START_TOKENS", "512"))
+ALGEBRAIC_MAX_PSEUDOWORDS = int(os.environ.get("DETOK_ALGEBRAIC_MAX_PSEUDOWORDS", "2000"))
+ALGEBRAIC_MAX_WORD_TOKENS = int(os.environ.get("DETOK_ALGEBRAIC_MAX_WORD_TOKENS", "6"))
+ALGEBRAIC_MAX_SURFACE_LEN = int(os.environ.get("DETOK_ALGEBRAIC_MAX_SURFACE_LEN", "24"))
+ALGEBRAIC_REF_CHARS = int(os.environ.get("DETOK_ALGEBRAIC_REF_CHARS", "5000000"))
+ALGEBRAIC_MAX_SOLVED_APPLY = int(os.environ.get("DETOK_ALGEBRAIC_MAX_SOLVED_APPLY", "4096"))
+ALGEBRAIC_MIN_GROUP = int(os.environ.get("DETOK_ALGEBRAIC_MIN_GROUP", "2"))
+ALGEBRAIC_START_SCORE = os.environ.get("DETOK_ALGEBRAIC_START_SCORE", "right-left")
 
 TOP_TOKENS = 50_000
 ANCHORS = 8_192
@@ -542,6 +554,260 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
     return mapping
 
 
+def entropy(bucket: dict[int, int]) -> float:
+    total = float(sum(bucket.values()))
+    if total <= 0.0:
+        return 0.0
+    return float(-sum((count / total) * math.log(count / total) for count in bucket.values()))
+
+
+def inverse_permutation(perm: np.ndarray) -> np.ndarray:
+    inv = np.empty(len(perm), dtype=np.int64)
+    inv[np.asarray(perm, dtype=np.int64)] = np.arange(len(perm), dtype=np.int64)
+    return inv
+
+
+def token_piece(adapter, token_id: int, cache: dict[int, str]) -> str:
+    token_id = int(token_id)
+    if token_id not in cache:
+        cache[token_id] = adapter.decode([token_id])
+    return cache[token_id]
+
+
+def likely_word_start_tokens(ids: np.ndarray, topn: int) -> tuple[set[int], dict[str, float]]:
+    arr = np.asarray(ids, dtype=np.int64)
+    token_counts = np.bincount(arr, minlength=int(arr.max(initial=0)) + 1)
+    left: dict[int, dict[int, int]] = defaultdict(dict)
+    right: dict[int, dict[int, int]] = defaultdict(dict)
+    for pos, token_raw in enumerate(arr):
+        token = int(token_raw)
+        if pos > 0:
+            prev = int(arr[pos - 1])
+            left[token][prev] = left[token].get(prev, 0) + 1
+        if pos + 1 < len(arr):
+            nxt = int(arr[pos + 1])
+            right[token][nxt] = right[token].get(nxt, 0) + 1
+    rows: list[tuple[float, int, float, float, int]] = []
+    for token in np.flatnonzero(token_counts >= 4):
+        l_ent = entropy(left.get(int(token), {}))
+        r_ent = entropy(right.get(int(token), {}))
+        freq_bonus = 0.05 * math.log1p(int(token_counts[token]))
+        if ALGEBRAIC_START_SCORE == "left-right":
+            score = l_ent - r_ent + freq_bonus
+        elif ALGEBRAIC_START_SCORE == "left":
+            score = l_ent + freq_bonus
+        elif ALGEBRAIC_START_SCORE == "right":
+            score = r_ent + freq_bonus
+        elif ALGEBRAIC_START_SCORE == "freq":
+            score = math.log1p(int(token_counts[token]))
+        else:
+            score = r_ent - l_ent + freq_bonus
+        rows.append((score, int(token), l_ent, r_ent, int(token_counts[token])))
+    rows.sort(reverse=True)
+    starts = {token for _, token, _, _, _ in rows[:topn]}
+    if rows:
+        best_score, best_token, best_left, best_right, best_count = rows[0]
+        report = {
+            "best_score": best_score,
+            "best_token": float(best_token),
+            "best_left_entropy": best_left,
+            "best_right_entropy": best_right,
+            "best_count": float(best_count),
+        }
+    else:
+        report = {"best_score": 0.0, "best_token": -1.0, "best_left_entropy": 0.0, "best_right_entropy": 0.0, "best_count": 0.0}
+    return starts, report
+
+
+def pseudo_word_counts(ids: np.ndarray, starts: set[int]) -> Counter[tuple[int, ...]]:
+    counts_by_word: Counter[tuple[int, ...]] = Counter()
+    current: list[int] = []
+    for raw in ids:
+        token = int(raw)
+        if current and token in starts:
+            if len(current) <= ALGEBRAIC_MAX_WORD_TOKENS:
+                counts_by_word[tuple(current)] += 1
+            current = [token]
+        else:
+            current.append(token)
+            if len(current) > ALGEBRAIC_MAX_WORD_TOKENS:
+                current = [token] if token in starts else []
+    if current and len(current) <= ALGEBRAIC_MAX_WORD_TOKENS:
+        counts_by_word[tuple(current)] += 1
+    return counts_by_word
+
+
+def reference_surfaces(path: Path) -> list[str]:
+    text = path.read_text(encoding="utf-8", errors="ignore")[:ALGEBRAIC_REF_CHARS]
+    # Keep a leading blank on word-like surfaces so equations can solve
+    # space-attached subwords without a separate word-boundary variable.
+    matches = re.findall(r"[A-Za-z]+(?:'[A-Za-z]+)?|[0-9]+|[^\w\s]", text)
+    counts_by_surface: Counter[str] = Counter()
+    for match in matches:
+        if len(match) > ALGEBRAIC_MAX_SURFACE_LEN:
+            continue
+        if re.match(r"[A-Za-z0-9]", match):
+            surface = " " + match.lower()
+        else:
+            surface = match
+        counts_by_surface[surface] += 1
+    return [surface for surface, _ in counts_by_surface.most_common(ALGEBRAIC_MAX_PSEUDOWORDS)]
+
+
+def longest_common_prefix(strings: list[str]) -> str:
+    if not strings:
+        return ""
+    prefix = strings[0]
+    for value in strings[1:]:
+        limit = min(len(prefix), len(value))
+        idx = 0
+        while idx < limit and prefix[idx] == value[idx]:
+            idx += 1
+        prefix = prefix[:idx]
+        if not prefix:
+            break
+    return prefix
+
+
+def longest_common_suffix(strings: list[str]) -> str:
+    reversed_suffix = longest_common_prefix([value[::-1] for value in strings])
+    return reversed_suffix[::-1]
+
+
+def solve_word_equations(equations: list[tuple[tuple[int, ...], str]]) -> dict[int, str]:
+    solved: dict[int, str] = {}
+    by_first: dict[int, list[str]] = defaultdict(list)
+    by_last: dict[int, list[str]] = defaultdict(list)
+    for tokens, surface in equations:
+        if not tokens:
+            continue
+        by_first[int(tokens[0])].append(surface)
+        by_last[int(tokens[-1])].append(surface)
+        if len(tokens) == 1 and int(tokens[0]) not in solved:
+            solved[int(tokens[0])] = surface
+
+    for token, surfaces in by_first.items():
+        if token in solved or len(surfaces) < ALGEBRAIC_MIN_GROUP:
+            continue
+        prefix = longest_common_prefix(surfaces)
+        if prefix and len(prefix) <= 12:
+            solved[token] = prefix
+    for token, surfaces in by_last.items():
+        if token in solved or len(surfaces) < ALGEBRAIC_MIN_GROUP:
+            continue
+        suffix = longest_common_suffix(surfaces)
+        if suffix and len(suffix) <= 12:
+            solved[token] = suffix
+
+    for _ in range(12):
+        changed = 0
+        for tokens, surface in equations:
+            remaining = surface
+            open_tokens = list(map(int, tokens))
+            while open_tokens and open_tokens[0] in solved and remaining.startswith(solved[open_tokens[0]]):
+                remaining = remaining[len(solved[open_tokens[0]]) :]
+                open_tokens.pop(0)
+            while open_tokens and open_tokens[-1] in solved and remaining.endswith(solved[open_tokens[-1]]):
+                remaining = remaining[: -len(solved[open_tokens[-1]])] if solved[open_tokens[-1]] else remaining
+                open_tokens.pop()
+            if len(open_tokens) == 1 and remaining and len(remaining) <= 16:
+                token = open_tokens[0]
+                old = solved.get(token)
+                if old is None:
+                    solved[token] = remaining
+                    changed += 1
+                elif old != remaining:
+                    # Conflicting rank cribs are common; drop the token instead
+                    # of letting one bad equation poison the decode.
+                    solved.pop(token, None)
+        if changed == 0:
+            break
+    return solved
+
+
+def algebraic_pseudoword_decode(task, mapping: np.ndarray, baseline_text: str, baseline_metrics: dict[str, float]) -> dict[str, object]:
+    print("algebraic_pseudoword=1", flush=True)
+    sample = np.asarray(task.cipher_ids[:SAMPLE_TOKENS], dtype=np.int64)
+    starts, entropy_report = likely_word_start_tokens(sample, ALGEBRAIC_START_TOKENS)
+    pseudo_counts = pseudo_word_counts(sample, starts)
+    pseudo_words = [word for word, _ in pseudo_counts.most_common(ALGEBRAIC_MAX_PSEUDOWORDS)]
+    surfaces = reference_surfaces(task.reference_text)
+    equations: list[tuple[tuple[int, ...], str]] = []
+    for pseudo, surface in zip(pseudo_words, surfaces):
+        if len(pseudo) <= ALGEBRAIC_MAX_WORD_TOKENS and len(surface) <= ALGEBRAIC_MAX_SURFACE_LEN:
+            equations.append((pseudo, surface))
+
+    solved = solve_word_equations(equations)
+    inv_perm = inverse_permutation(task.perm)
+    exact = 0
+    token_mass = 0
+    source_piece_cache: dict[int, str] = {}
+    for token, piece in solved.items():
+        count = int(np.count_nonzero(sample == token))
+        token_mass += count
+        if 0 <= token < len(inv_perm):
+            true_piece = token_piece(task.source_adapter, int(inv_perm[token]), source_piece_cache)
+            if piece == true_piece:
+                exact += 1
+    exact_rate = exact / max(1, len(solved))
+    mass_rate = token_mass / max(1, len(sample))
+
+    target_piece_cache: dict[int, str] = {}
+    apply_items = sorted(solved.items(), key=lambda item: -int(np.count_nonzero(sample == item[0])))[:ALGEBRAIC_MAX_SOLVED_APPLY]
+    applied = dict(apply_items)
+    pieces: list[str] = []
+    for raw in sample:
+        token = int(raw)
+        if token in applied:
+            pieces.append(applied[token])
+        else:
+            pieces.append(token_piece(task.target_adapter, int(mapping[token]), target_piece_cache))
+    recovered = "".join(pieces)
+    metrics = evaluate_recovery(task, recovered, SAMPLE_TOKENS)
+
+    # Diagnostic upper bound for this equation solver: apply only exact solved
+    # pieces. This uses oracle labels only to judge whether the equations found
+    # enough useful material to justify a safer selector later.
+    oracle_good = {}
+    for token, piece in applied.items():
+        if 0 <= token < len(inv_perm):
+            true_piece = token_piece(task.source_adapter, int(inv_perm[token]), source_piece_cache)
+            if piece == true_piece:
+                oracle_good[token] = piece
+    oracle_pieces = []
+    for raw in sample:
+        token = int(raw)
+        if token in oracle_good:
+            oracle_pieces.append(oracle_good[token])
+        else:
+            oracle_pieces.append(token_piece(task.target_adapter, int(mapping[token]), target_piece_cache))
+    oracle_metrics = evaluate_recovery(task, "".join(oracle_pieces), SAMPLE_TOKENS)
+
+    report = {
+        "start_tokens": len(starts),
+        "pseudo_word_types": len(pseudo_counts),
+        "equations": len(equations),
+        "solved_tokens": len(solved),
+        "applied_tokens": len(applied),
+        "exact_solved_tokens": exact,
+        "exact_solved_rate": exact_rate,
+        "solved_token_mass": mass_rate,
+        "baseline_cer50k": float(baseline_metrics["cer50k"]),
+        "algebraic_cer50k": float(metrics["cer50k"]),
+        "algebraic_bpb": float(metrics["byte_lm_bpb"]),
+        "oracle_good_cer50k": float(oracle_metrics["cer50k"]),
+        "oracle_good_bpb": float(oracle_metrics["byte_lm_bpb"]),
+        "start_score": ALGEBRAIC_START_SCORE,
+        **entropy_report,
+    }
+    print(
+        "algebraic_pseudoword_report "
+        + " ".join(f"{key}={value:.6f}" if isinstance(value, float) else f"{key}={value}" for key, value in report.items()),
+        flush=True,
+    )
+    return {"report": report, "preview": recovered[:1000]}
+
+
 def main() -> None:
     t0 = time.time()
     task = load_task(
@@ -560,6 +826,9 @@ def main() -> None:
     mapped_sample = mapping[task.cipher_ids[:SAMPLE_TOKENS]]
     recovered_sample = task.target_adapter.decode(mapped_sample.tolist())
     metrics = evaluate_recovery(task, recovered_sample, SAMPLE_TOKENS)
+    algebraic_report = (
+        algebraic_pseudoword_decode(task, mapping, recovered_sample, metrics) if ALGEBRAIC_PSEUDOWORD else None
+    )
 
     out_dir = CACHE_DIR / "runs"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -586,6 +855,8 @@ def main() -> None:
         "metrics": metrics,
         "preview": recovered_sample[:1000],
     }
+    if algebraic_report is not None:
+        report["algebraic_pseudoword"] = algebraic_report
     (out_dir / "last_report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
 
     print("---")
