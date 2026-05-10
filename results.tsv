@@ -118,3 +118,4 @@ a08609d	core-100k	0.453876	0.461900	2.654633	6.3	keep	fixed-neighbor tail unary 
 97a1814	qwen36-qwen36-1m-diagnostic	0.242780	0.242780	2.683163	6.3	diagnostic	source-retokenized reference sharply improved 1m, exposing cross-tokenizer one-token emission bottleneck
 cfb1015	qwen36-o200k-1m-screen	0.283940	0.283940	2.773606	6.3	discard	conservative length-2 target emissions accepted 6 expansions but worsened hard 1m screen
 9870a98	qwen36-o200k-100k-screen	0.468460	0.468460	2.700488	6.3	discard	mid-round mini bigram repair over-swapped early anchors and worsened hard low-data screen
+2b252f0	qwen36-o200k-100k-diagnostics	0.454300	0.454300	2.711974	6.3	diagnostic	diagnostics reproduced accepted screen; 26250 refinement edges missed p_nodes and edit errors were mostly alphanumeric
