@@ -76,6 +76,14 @@ TAIL_REPAIR_NODES = 1_024
 TAIL_REPAIR_CONTEXTS = 8_192
 TAIL_REPAIR_CANDIDATES = 8
 TAIL_REPAIR_MIN_GAIN_PER_OCC = 0.15
+VARIABLE_EMISSIONS = True
+VARIABLE_EMISSION_MIN_TOKENS = 1_000_000
+VARIABLE_EMISSION_MAX_TOKENS = 1_000_000
+VARIABLE_EMISSION_NODES = 512
+VARIABLE_EMISSION_CONTEXTS = 8_192
+VARIABLE_EMISSION_CANDIDATES = 12
+VARIABLE_EMISSION_MIN_GAIN_PER_OCC = 0.10
+VARIABLE_EMISSION_MIN_MID_COUNT = 5
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -512,7 +520,139 @@ def tail_unary_repair(
     return repaired
 
 
-def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_size: int) -> np.ndarray:
+def learn_variable_emissions(
+    cipher_ids: np.ndarray,
+    ref_ids: np.ndarray,
+    mapping: np.ndarray,
+    c_counts: np.ndarray,
+    c_focus: np.ndarray,
+    edges: list[tuple[float, int, int]],
+    target_vocab_size: int,
+) -> dict[int, tuple[int, int]]:
+    if (
+        not VARIABLE_EMISSIONS
+        or len(cipher_ids) < VARIABLE_EMISSION_MIN_TOKENS
+        or len(cipher_ids) > VARIABLE_EMISSION_MAX_TOKENS
+        or VARIABLE_EMISSION_NODES <= 0
+    ):
+        return {}
+    var_nodes = c_focus[: min(len(c_focus), VARIABLE_EMISSION_NODES)]
+    if len(var_nodes) < 64:
+        return {}
+
+    context_c: list[int] = []
+    context_p: list[int] = []
+    seen_p: set[int] = set()
+    for c in c_focus[: max(VARIABLE_EMISSION_CONTEXTS * 2, VARIABLE_EMISSION_CONTEXTS)]:
+        c_int = int(c)
+        p_int = int(mapping[c_int])
+        if p_int < 0 or p_int >= target_vocab_size or p_int in seen_p:
+            continue
+        context_c.append(c_int)
+        context_p.append(p_int)
+        seen_p.add(p_int)
+        if len(context_c) >= VARIABLE_EMISSION_CONTEXTS:
+            break
+    if len(context_c) < 64:
+        return {}
+
+    node_set = set(map(int, var_nodes))
+    candidates_by_c: dict[int, list[int]] = {int(c): [int(mapping[int(c)])] for c in var_nodes}
+    for _, c, p in edges:
+        if c not in node_set:
+            continue
+        cand = candidates_by_c[int(c)]
+        p_int = int(p)
+        if len(cand) >= VARIABLE_EMISSION_CANDIDATES:
+            continue
+        if p_int < 0 or p_int >= target_vocab_size or p_int in cand:
+            continue
+        cand.append(p_int)
+
+    candidate_p: list[int] = []
+    candidate_pos: dict[int, int] = {}
+    for cand in candidates_by_c.values():
+        for p in cand:
+            if p not in candidate_pos:
+                candidate_pos[p] = len(candidate_p)
+                candidate_p.append(p)
+    if len(candidate_p) < 64:
+        return {}
+
+    var_arr = np.asarray(list(candidates_by_c.keys()), dtype=np.int64)
+    context_c_arr = np.asarray(context_c, dtype=np.int64)
+    context_p_arr = np.asarray(context_p, dtype=np.int64)
+    candidate_p_arr = np.asarray(candidate_p, dtype=np.int64)
+
+    c_right = dense_cross_bigram_counts(cipher_ids, var_arr, context_c_arr, len(mapping))
+    c_left = dense_cross_bigram_counts(cipher_ids, context_c_arr, var_arr, len(mapping)).T
+    p_right = dense_cross_bigram_counts(ref_ids, candidate_p_arr, context_p_arr, target_vocab_size)
+    p_left = dense_cross_bigram_counts(ref_ids, context_p_arr, candidate_p_arr, target_vocab_size)
+    p_mid = dense_cross_bigram_counts(ref_ids, candidate_p_arr, candidate_p_arr, target_vocab_size)
+    p_right_log = np.log(
+        (p_right + BIGRAM_REFINE_ALPHA)
+        / (p_right.sum(axis=1, keepdims=True) + BIGRAM_REFINE_ALPHA * len(context_p_arr))
+    ).astype(np.float32)
+    p_left_log = np.log(
+        (p_left + BIGRAM_REFINE_ALPHA)
+        / (p_left.sum(axis=1, keepdims=True) + BIGRAM_REFINE_ALPHA * len(candidate_p_arr))
+    ).astype(np.float32)
+    p_mid_log = np.log(
+        (p_mid + BIGRAM_REFINE_ALPHA)
+        / (p_mid.sum(axis=1, keepdims=True) + BIGRAM_REFINE_ALPHA * len(candidate_p_arr))
+    ).astype(np.float32)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    with torch.no_grad():
+        left_scores_t = torch.as_tensor(c_left, dtype=torch.float32, device=device) @ torch.as_tensor(
+            p_left_log, dtype=torch.float32, device=device
+        )
+        right_scores_t = torch.as_tensor(c_right, dtype=torch.float32, device=device) @ torch.as_tensor(
+            p_right_log, dtype=torch.float32, device=device
+        ).T
+        left_scores = left_scores_t.cpu().numpy()
+        right_scores = right_scores_t.cpu().numpy()
+
+    emissions: dict[int, tuple[int, int]] = {}
+    for row, c in enumerate(var_arr):
+        cand = candidates_by_c[int(c)]
+        if len(cand) <= 1:
+            continue
+        cand_idx = np.asarray([candidate_pos[p] for p in cand], dtype=np.int64)
+        current_p = int(mapping[int(c)])
+        current_idx = candidate_pos.get(current_p)
+        if current_idx is None:
+            continue
+        current_score = float(left_scores[row, current_idx] + right_scores[row, current_idx])
+        pair_scores = (
+            left_scores[row, cand_idx][:, None]
+            + float(max(1.0, float(c_counts[int(c)]))) * p_mid_log[np.ix_(cand_idx, cand_idx)]
+            + right_scores[row, cand_idx][None, :]
+        )
+        valid_pairs = p_mid[np.ix_(cand_idx, cand_idx)] >= VARIABLE_EMISSION_MIN_MID_COUNT
+        if not bool(valid_pairs.any()):
+            continue
+        pair_scores = np.where(valid_pairs, pair_scores, -np.inf)
+        best_flat = int(np.argmax(pair_scores))
+        best_score = float(pair_scores.reshape(-1)[best_flat])
+        if not np.isfinite(best_score):
+            continue
+        occ = max(1.0, float(c_counts[int(c)]))
+        if (best_score - current_score) / occ < VARIABLE_EMISSION_MIN_GAIN_PER_OCC:
+            continue
+        first = int(cand[best_flat // len(cand_idx)])
+        second = int(cand[best_flat % len(cand_idx)])
+        emissions[int(c)] = (first, second)
+    print(
+        f"variable_emission_nodes={len(var_arr)} candidates={len(candidate_p_arr)} accepted={len(emissions)}",
+        flush=True,
+    )
+    return emissions
+
+
+def align_shuffled(
+    cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_size: int
+) -> tuple[np.ndarray, dict[int, tuple[int, int]]]:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device: {device}", flush=True)
     candidate_window = effective_candidate_window(len(cipher_ids))
@@ -539,6 +679,7 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
     p_rank[p_order_all] = np.arange(target_vocab_size)
     c_focus_pos = {int(token_id): row for row, token_id in enumerate(c_focus)}
     anchor_rows = np.arange(min(ANCHORS, len(c_focus)), dtype=np.int64)
+    variable_emissions: dict[int, tuple[int, int]] = {}
 
     for round_idx in range(rounds):
         c_anchors = c_focus[anchor_rows]
@@ -667,6 +808,15 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
                 edges,
                 target_vocab_size,
             )
+            variable_emissions = learn_variable_emissions(
+                cipher_ids,
+                ref_ids,
+                mapping,
+                c_counts,
+                c_focus,
+                edges,
+                target_vocab_size,
+            )
         if use_dynamic_anchors and len(assigned_scores) >= 64:
             assigned_scores.sort(reverse=True)
             next_anchor_rows: list[int] = []
@@ -683,7 +833,26 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
                 anchor_rows = np.asarray(next_anchor_rows, dtype=np.int64)
                 print(f"anchor_refresh={len(anchor_rows)}", flush=True)
         print(f"assigned={len(used_c)}", flush=True)
-    return mapping
+    return mapping, variable_emissions
+
+
+def decode_with_emissions(
+    ids: np.ndarray,
+    mapping: np.ndarray,
+    emissions: dict[int, tuple[int, int]],
+    target_adapter,
+) -> str:
+    if not emissions:
+        return target_adapter.decode(mapping[ids].tolist())
+    out_ids: list[int] = []
+    for token_id in ids:
+        c = int(token_id)
+        emission = emissions.get(c)
+        if emission is None:
+            out_ids.append(int(mapping[c]))
+        else:
+            out_ids.extend(emission)
+    return target_adapter.decode(out_ids)
 
 
 def main() -> None:
@@ -700,9 +869,13 @@ def main() -> None:
     print(f"cipher_tokens: {len(task.cipher_ids):,}")
     print(f"reference_tokens: {len(task.ref_ids):,}")
 
-    mapping = align_shuffled(task.cipher_ids, task.ref_ids, task.target_adapter.spec.vocab_size)
-    mapped_sample = mapping[task.cipher_ids[:SAMPLE_TOKENS]]
-    recovered_sample = task.target_adapter.decode(mapped_sample.tolist())
+    mapping, variable_emissions = align_shuffled(task.cipher_ids, task.ref_ids, task.target_adapter.spec.vocab_size)
+    recovered_sample = decode_with_emissions(
+        task.cipher_ids[:SAMPLE_TOKENS],
+        mapping,
+        variable_emissions,
+        task.target_adapter,
+    )
     metrics = evaluate_recovery(task, recovered_sample, SAMPLE_TOKENS)
 
     out_dir = CACHE_DIR / "runs"
@@ -726,6 +899,7 @@ def main() -> None:
         "bigram_refine_all_scales": BIGRAM_REFINE_ALL_SCALES,
         "skip_context_weight": SKIP_CONTEXT_WEIGHT,
         "learn_skip_weight": LEARN_SKIP_WEIGHT,
+        "variable_emissions": len(variable_emissions),
         "elapsed_seconds": time.time() - t0,
         "metrics": metrics,
         "preview": recovered_sample[:1000],
