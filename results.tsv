@@ -151,3 +151,4 @@ dfd85ab	qwen36-o200k-100k-screen	0.451680	0.451680	2.693335	6.3	discard	high-mar
 2c77200	qwen-mistral-gemma-100k-screen	0.459920	0.464420	2.673779	6.3	discard	single strongest variable emission is CER-neutral on three-pair screen with only tiny BPB gain
 1406268	core-100k-gemma	0.456364	0.464420	2.649934	6.3	keep	free local-pair variable emission gives a tiny non-same-tokenizer 100k mean CER and BPB gain
 b46ca65	core-100k-gemma	0.456364	0.464420	2.649479	6.3	keep	two free local-pair variable emissions preserve CER gain and improve BPB versus single emission
+c122aa2	qwen-mistral-gemma-100k-screen	0.461040	0.466300	2.673816	6.3	discard	four free local-pair emissions over-insert and regress Qwen and Mistral screens
