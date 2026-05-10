@@ -97,6 +97,18 @@ VARIABLE_EMISSION_MIN_COUNT = 10
 VARIABLE_EMISSION_MIN_GAIN_PER_OCC = 5.00
 VARIABLE_EMISSION_MAX_ACCEPTED = 2
 VARIABLE_EMISSION_FREE_LOCAL_PAIRS = True
+BAYES_TYPE_SAMPLER = os.environ.get("DETOK_BAYES_TYPE_SAMPLER", "0") == "1"
+BAYES_MAX_TOKENS = int(os.environ.get("DETOK_BAYES_MAX_TOKENS", "100000"))
+BAYES_NODES = int(os.environ.get("DETOK_BAYES_NODES", "2048"))
+BAYES_CONTEXTS = int(os.environ.get("DETOK_BAYES_CONTEXTS", "8192"))
+BAYES_CANDIDATES = int(os.environ.get("DETOK_BAYES_CANDIDATES", "32"))
+BAYES_SWEEPS = int(os.environ.get("DETOK_BAYES_SWEEPS", "8"))
+BAYES_TEMP_START = float(os.environ.get("DETOK_BAYES_TEMP_START", "10.0"))
+BAYES_TEMP_END = float(os.environ.get("DETOK_BAYES_TEMP_END", "1.0"))
+BAYES_UNARY_WEIGHT = float(os.environ.get("DETOK_BAYES_UNARY_WEIGHT", "0.05"))
+BAYES_MOVE_PENALTY = float(os.environ.get("DETOK_BAYES_MOVE_PENALTY", "0.05"))
+BAYES_DUPLICATE_PENALTY = float(os.environ.get("DETOK_BAYES_DUPLICATE_PENALTY", "0.25"))
+BAYES_MAX_TARGET_POOL = int(os.environ.get("DETOK_BAYES_MAX_TARGET_POOL", "16000"))
 
 LAST_FINAL_EDGES: list[tuple[float, int, int]] = []
 LAST_C_FOCUS: np.ndarray = np.empty(0, dtype=np.int64)
@@ -325,6 +337,166 @@ def bigram_swap_delta(c_big: np.ndarray, p_log: np.ndarray, perm: np.ndarray, a:
             old -= float(c_big[i, j] * p_log[int(perm[i]), int(perm[j])])
             new -= float(c_big[i, j] * p_log[int(new_perm[i]), int(new_perm[j])])
     return new - old
+
+
+def build_graph_domains(
+    c_nodes: np.ndarray,
+    mapping: np.ndarray,
+    edges: list[tuple[float, int, int]],
+    candidates_per_node: int,
+) -> tuple[list[list[int]], list[dict[int, float]]]:
+    node_set = set(map(int, c_nodes))
+    domains: dict[int, list[int]] = {int(c): [int(mapping[int(c)])] for c in c_nodes}
+    scores: dict[int, dict[int, float]] = {int(c): {int(mapping[int(c)]): 0.0} for c in c_nodes}
+    top_score: dict[int, float] = {}
+    for score, c, p in edges:
+        c_int = int(c)
+        if c_int not in node_set:
+            continue
+        top_score.setdefault(c_int, float(score))
+        domain = domains[c_int]
+        if len(domain) >= candidates_per_node + 1:
+            continue
+        p_int = int(p)
+        if p_int in scores[c_int]:
+            continue
+        domain.append(p_int)
+        scores[c_int][p_int] = float(score) - top_score[c_int]
+    return [domains[int(c)] for c in c_nodes], [scores[int(c)] for c in c_nodes]
+
+
+def bayesian_type_sampler(
+    cipher_ids: np.ndarray,
+    ref_ids: np.ndarray,
+    mapping: np.ndarray,
+    c_focus: np.ndarray,
+    edges: list[tuple[float, int, int]],
+    target_vocab_size: int,
+    p_counts: np.ndarray,
+) -> np.ndarray:
+    if not BAYES_TYPE_SAMPLER or len(cipher_ids) > BAYES_MAX_TOKENS:
+        return mapping
+    n = min(BAYES_NODES, len(c_focus))
+    if n < 64 or BAYES_SWEEPS <= 0:
+        return mapping
+    c_nodes = c_focus[:n]
+    node_set = set(map(int, c_nodes))
+    context_nodes = list(map(int, c_nodes))
+    for c in c_focus[: min(BAYES_CONTEXTS, len(c_focus))]:
+        c_int = int(c)
+        if c_int not in node_set:
+            context_nodes.append(c_int)
+    context_arr = np.asarray(context_nodes, dtype=np.int64)
+
+    domains, unary_scores = build_graph_domains(c_nodes, mapping, edges, BAYES_CANDIDATES)
+    target_pool = {int(p) for domain in domains for p in domain}
+    target_pool.update(int(mapping[int(c)]) for c in context_arr)
+    if len(target_pool) > BAYES_MAX_TARGET_POOL:
+        print(f"bayes_sampler_skipped_target_pool={len(target_pool)}", flush=True)
+        return mapping
+
+    target_arr = np.asarray(sorted(target_pool), dtype=np.int64)
+    target_pos = {int(p): i for i, p in enumerate(target_arr)}
+    domains_idx = [[target_pos[int(p)] for p in domain if int(p) in target_pos] for domain in domains]
+    if any(len(domain) == 0 for domain in domains_idx):
+        return mapping
+    assignment = np.asarray([target_pos[int(mapping[int(c)])] for c in c_nodes], dtype=np.int64)
+    context_assignment = np.asarray([target_pos[int(mapping[int(c)])] for c in context_arr], dtype=np.int64)
+    context_assignment[:n] = assignment
+
+    c_right = dense_cross_bigram_counts(cipher_ids, c_nodes, context_arr, len(mapping))
+    c_left = dense_cross_bigram_counts(cipher_ids, context_arr, c_nodes, len(mapping)).T
+    p_big = dense_bigram_counts(ref_ids, target_arr, target_vocab_size)
+    row_totals = p_big.sum(axis=1, keepdims=True)
+    p_probs = (p_big + BIGRAM_REFINE_ALPHA) / (row_totals + BIGRAM_REFINE_ALPHA * len(target_arr))
+    if BIGRAM_UNIGRAM_BACKOFF and len(cipher_ids) <= BIGRAM_UNIGRAM_BACKOFF_MAX_TOKENS:
+        unigram = p_counts[target_arr].astype(np.float32)
+        unigram = (unigram + BIGRAM_REFINE_ALPHA) / (float(unigram.sum()) + BIGRAM_REFINE_ALPHA * len(target_arr))
+        lam = row_totals / (row_totals + BIGRAM_UNIGRAM_BACKOFF_TAU)
+        p_probs = lam * p_probs + (1.0 - lam) * unigram[None, :]
+    p_log = np.log(p_probs).astype(np.float32)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    p_log_t = torch.as_tensor(p_log, dtype=torch.float32, device=device)
+    c_right_t = torch.as_tensor(c_right, dtype=torch.float32, device=device)
+    c_left_t = torch.as_tensor(c_left, dtype=torch.float32, device=device)
+    assign_t = torch.as_tensor(context_assignment.astype(np.int64), dtype=torch.long, device=device)
+    owner_counts = torch.bincount(
+        torch.as_tensor(assignment.astype(np.int64), dtype=torch.long, device=device),
+        minlength=len(target_arr),
+    ).to(torch.int32)
+    domain_tensors = [torch.as_tensor(domain, dtype=torch.long, device=device) for domain in domains_idx]
+    unary_tensors = [
+        torch.as_tensor(
+            [unary_scores[i].get(int(target_arr[p_idx]), -1.0) for p_idx in domain],
+            dtype=torch.float32,
+            device=device,
+        )
+        for i, domain in enumerate(domains_idx)
+    ]
+
+    rng = np.random.default_rng(SEED)
+    current_assignment = assignment.copy()
+    best_assignment = assignment.copy()
+    current_score = 0.0
+    best_score = 0.0
+    total_moves = 0
+    sampled_moves = 0
+
+    def candidate_scores(i: int, cand_t: torch.Tensor, current_idx: int) -> torch.Tensor:
+        right = p_log_t[cand_t][:, assign_t] @ c_right_t[i]
+        left = p_log_t[assign_t][:, cand_t].T @ c_left_t[i]
+        scores = right + left + BAYES_UNARY_WEIGHT * unary_tensors[i]
+        dup = owner_counts[cand_t].to(torch.float32) - (cand_t == current_idx).to(torch.float32)
+        scores = scores - BAYES_DUPLICATE_PENALTY * torch.log1p(torch.clamp_min(dup, 0.0))
+        scores = scores - BAYES_MOVE_PENALTY * (cand_t != current_idx).to(torch.float32)
+        return scores
+
+    for sweep in range(BAYES_SWEEPS):
+        if BAYES_SWEEPS == 1:
+            temp = BAYES_TEMP_END
+        else:
+            frac = sweep / float(BAYES_SWEEPS - 1)
+            temp = BAYES_TEMP_START + frac * (BAYES_TEMP_END - BAYES_TEMP_START)
+        sweep_moves = 0
+        for i in rng.permutation(n):
+            current_idx = int(current_assignment[int(i)])
+            cand_t = domain_tensors[int(i)]
+            scores = candidate_scores(int(i), cand_t, current_idx)
+            current_pos = torch.nonzero(cand_t == current_idx, as_tuple=False)
+            current_score_i = scores[int(current_pos[0])] if len(current_pos) else torch.tensor(-1.0e9, device=device)
+            logits = (scores - torch.max(scores)) / max(temp, 1.0e-3)
+            probs = torch.softmax(logits, dim=0)
+            choice = int(torch.multinomial(probs, 1).item())
+            new_idx = int(cand_t[choice].item())
+            if new_idx == current_idx:
+                continue
+            new_score_i = scores[choice]
+            owner_counts[current_idx] -= 1
+            owner_counts[new_idx] += 1
+            current_assignment[int(i)] = new_idx
+            assign_t[int(i)] = new_idx
+            delta = float((new_score_i - current_score_i).detach().cpu())
+            current_score += delta
+            sweep_moves += 1
+            sampled_moves += int(delta <= 0.0)
+            if current_score > best_score:
+                best_score = current_score
+                best_assignment = current_assignment.copy()
+        total_moves += sweep_moves
+        print(f"bayes_sweep={sweep + 1} temp={temp:.3f} moves={sweep_moves} score={current_score:.3f}", flush=True)
+
+    if total_moves:
+        refined = mapping.copy()
+        for i, c in enumerate(c_nodes):
+            refined[int(c)] = int(target_arr[int(best_assignment[i])])
+        mapping = refined
+    print(
+        f"bayes_sampler_nodes={n} domains={sum(len(d) for d in domains_idx)} target_pool={len(target_arr)} "
+        f"moves={total_moves} downhill_samples={sampled_moves} best_score={best_score:.3f}",
+        flush=True,
+    )
+    return mapping
 
 
 def refine_with_bigram_objective(
@@ -872,6 +1044,15 @@ def align_shuffled(
             next_mapping[c] = p
         mapping = next_mapping
         if round_idx == rounds - 1 and (use_dynamic_anchors or BIGRAM_REFINE_ALL_SCALES):
+            mapping = bayesian_type_sampler(
+                cipher_ids,
+                ref_ids,
+                mapping,
+                c_focus,
+                edges,
+                target_vocab_size,
+                p_counts,
+            )
             mapping = refine_with_bigram_objective(
                 cipher_ids,
                 ref_ids,
