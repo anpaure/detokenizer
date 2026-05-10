@@ -1988,6 +1988,91 @@ def score_cem_overrides(
     return objective, details
 
 
+def selected_cem_move_oracle_audit(
+    task,
+    sample_cipher: np.ndarray,
+    mapping: np.ndarray,
+    emissions: dict[int, tuple[int, ...]],
+    selected_overrides: dict[int, int],
+    pool: list[dict[str, float | int]],
+    baseline_cer: float,
+) -> dict[str, object]:
+    inv = inverse_permutation(task.perm)
+    truth: dict[int, int] = {}
+    for c in set(selected_overrides) | {int(move["c"]) for move in pool}:
+        true_p, _piece, _cls = singleton_truth_for_cipher(task, int(c), inv)
+        if true_p is not None:
+            truth[int(c)] = int(true_p)
+
+    good_selected = {c: p for c, p in selected_overrides.items() if truth.get(int(c)) == int(p)}
+    bad_selected = {c: p for c, p in selected_overrides.items() if truth.get(int(c)) != int(p)}
+    selected_text = decode_with_singleton_overrides(sample_cipher, mapping, emissions, selected_overrides, task.target_adapter)
+    selected_metrics = evaluate_recovery(task, selected_text, SAMPLE_TOKENS)
+    good_only_text = decode_with_singleton_overrides(sample_cipher, mapping, emissions, good_selected, task.target_adapter)
+    good_only_metrics = evaluate_recovery(task, good_only_text, SAMPLE_TOKENS)
+    bad_reverted_overrides = dict(good_selected)
+    bad_reverted_text = decode_with_singleton_overrides(
+        sample_cipher,
+        mapping,
+        emissions,
+        bad_reverted_overrides,
+        task.target_adapter,
+    )
+    bad_reverted_metrics = evaluate_recovery(task, bad_reverted_text, SAMPLE_TOKENS)
+
+    pool_good: list[tuple[float, int, int]] = []
+    for move in pool:
+        c = int(move["c"])
+        p = int(move["p"])
+        if truth.get(c) == p:
+            pool_good.append((float(move.get("prior_score", 0.0)), c, p))
+    pool_good.sort(reverse=True)
+    best_n_rows: list[dict[str, float | int]] = []
+    for n in (8, 16, 32, 64, 128):
+        overrides: dict[int, int] = {}
+        used_p: set[int] = set()
+        for _prior, c, p in pool_good:
+            if c in overrides or p in used_p:
+                continue
+            overrides[c] = p
+            used_p.add(p)
+            if len(overrides) >= n:
+                break
+        if not overrides:
+            continue
+        text = decode_with_singleton_overrides(sample_cipher, mapping, emissions, overrides, task.target_adapter)
+        metrics = evaluate_recovery(task, text, SAMPLE_TOKENS)
+        best_n_rows.append(
+            {
+                "n": int(n),
+                "moves": int(len(overrides)),
+                "cer50k": float(metrics["cer50k"]),
+                "cer_delta": float(baseline_cer - float(metrics["cer50k"])),
+            }
+        )
+
+    c_counts = counts(task.cipher_ids, int(max(len(mapping), int(task.cipher_ids.max(initial=0)) + 1)))
+    good_mass = float(sum(int(c_counts[c]) for c in good_selected)) / max(1.0, float(len(sample_cipher)))
+    bad_mass = float(sum(int(c_counts[c]) for c in bad_selected)) / max(1.0, float(len(sample_cipher)))
+    audit = {
+        "selected_moves": int(len(selected_overrides)),
+        "oracle_good_moves": int(len(good_selected)),
+        "oracle_bad_moves": int(len(bad_selected)),
+        "good_move_precision": float(len(good_selected) / max(1, len(selected_overrides))),
+        "good_move_mass": good_mass,
+        "bad_move_mass": bad_mass,
+        "selected_cer50k": float(selected_metrics["cer50k"]),
+        "selected_cer_delta": float(baseline_cer - float(selected_metrics["cer50k"])),
+        "good_only_cer50k": float(good_only_metrics["cer50k"]),
+        "good_only_cer_delta": float(baseline_cer - float(good_only_metrics["cer50k"])),
+        "bad_reverted_cer50k": float(bad_reverted_metrics["cer50k"]),
+        "bad_reverted_cer_delta": float(baseline_cer - float(bad_reverted_metrics["cer50k"])),
+        "best_n_pool_good": best_n_rows,
+    }
+    print("retok_cem_selected_oracle_audit:", json.dumps(audit, sort_keys=True), flush=True)
+    return audit
+
+
 def retok_cem_search(
     task,
     mapping: np.ndarray,
@@ -2126,6 +2211,16 @@ def retok_cem_search(
         repaired_emissions.pop(int(c), None)
     repaired_text = decode_with_variable_emissions(sample_cipher, repaired, repaired_emissions, task.target_adapter)
     repaired_metrics = evaluate_recovery(task, repaired_text, SAMPLE_TOKENS)
+    selected_audit = selected_cem_move_oracle_audit(
+        task,
+        sample_cipher,
+        mapping,
+        emissions,
+        best_overrides,
+        pool,
+        float(baseline_metrics["cer50k"]),
+    )
+    report["selected_move_oracle_audit"] = selected_audit
     report["repaired_metrics"] = repaired_metrics
     report["cer_delta"] = float(baseline_metrics["cer50k"] - repaired_metrics["cer50k"])
     print(
