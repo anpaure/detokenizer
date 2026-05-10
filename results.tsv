@@ -128,3 +128,4 @@ cfb3e24	core-1m-gemma	0.277212	0.309580	2.748144	6.3	keep	recomputed core-1m wit
 1651457	qwen36-o200k-10m-screen	0.066140	0.066140	2.641562	6.3	diagnostic	source-retokenized high-data path sharply improves hard 10m screen
 13b93d3	qwen36-o200k-100k-screen	0.452760	0.452760	2.708627	6.3	diagnostic	external-owner missed-candidate repair improves hard non-same-tokenizer 100k screen
 13b93d3	core-100k-gemma	0.457680	0.468160	2.662481	6.3	keep	external-owner missed-candidate repair improves Gemma-core 100k mean and max despite Mistral regression
+574c49d	qwen-mistral-100k-screen	0.457210	0.461020	2.689511	6.3	diagnostic	jackknife-gated external-owner repair trades some Qwen gain for lower Mistral overfit
