@@ -19,8 +19,7 @@ AGENTS.md
 # Experimental code/artifacts
 dev/
 
-# Results file
-results.tsv
+# Large/generated experiment outputs
 run.log
 *.log
 *.npy

@@ -13,7 +13,10 @@ agent optimizes recovery of shuffled token IDs.
   evaluation. Do not edit during a run.
 - `train.py` - mutable recovery algorithm. Agents hillclimb this file.
 - `program.md` - operating instructions for the autonomous loop.
-- `results.tsv` - untracked experiment log created when a run starts.
+- `results.tsv` - experiment ledger with successful, unsuccessful, diagnostic,
+  refine, and pivot runs.
+- `plots/improvement_over_time.svg` - summary plot generated from the accepted
+  experiment ledger.
 
 ## Install
 
@@ -103,6 +106,13 @@ reference_tokens_M: 95.030
 
 Lower `cer50k` is the objective. `byte_lm_bpb` is secondary; it can improve when
 the decoded text becomes more fluent but less correct.
+
+## Results
+
+![Improvement over time](plots/improvement_over_time.svg)
+
+The complete experiment ledger is tracked in `results.tsv`. It includes accepted
+keeps, discarded regressions, diagnostics, refinement notes, and pivots.
 
 ## Autonomous Mode
 
