@@ -60,7 +60,6 @@ BIGRAM_REFINE_TOKENS = 2_048
 BIGRAM_REFINE_MAX_PROPOSALS = 100_000
 BIGRAM_REFINE_PASSES = 4
 BIGRAM_REFINE_ALPHA = 0.05
-BIGRAM_REFINE_SORT_DELTAS = True
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -317,20 +316,7 @@ def refine_with_bigram_objective(
     for _ in range(BIGRAM_REFINE_PASSES):
         pass_swaps = 0
         passes_run += 1
-        if BIGRAM_REFINE_SORT_DELTAS:
-            ranked: list[tuple[float, int, int]] = []
-            for i, p_idx in proposals:
-                j = int(owner[p_idx])
-                if i == j:
-                    continue
-                delta = bigram_swap_delta(c_big, p_log, perm, i, j)
-                if delta > 0.0:
-                    ranked.append((delta, i, p_idx))
-            ranked.sort(reverse=True)
-            pass_proposals = [(i, p_idx) for _, i, p_idx in ranked]
-        else:
-            pass_proposals = proposals
-        for i, p_idx in pass_proposals:
+        for i, p_idx in proposals:
             j = int(owner[p_idx])
             if i == j:
                 continue
@@ -351,7 +337,6 @@ def refine_with_bigram_objective(
         refined[c_nodes] = p_nodes[perm]
         mapping = refined
     print(f"bigram_refine_proposals={len(proposals)}", flush=True)
-    print(f"bigram_refine_sort_deltas={BIGRAM_REFINE_SORT_DELTAS}", flush=True)
     print(f"bigram_refine_passes={passes_run}", flush=True)
     print(f"bigram_refine_swaps={swaps}", flush=True)
     return mapping
