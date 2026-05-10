@@ -103,6 +103,11 @@ VARIABLE_EMISSION_MIN_COUNT = 10
 VARIABLE_EMISSION_MIN_GAIN_PER_OCC = 5.00
 VARIABLE_EMISSION_MAX_ACCEPTED = 2
 VARIABLE_EMISSION_FREE_LOCAL_PAIRS = True
+LCB_VARIABLE_EMISSION_REPAIR = True
+LCB_VARIABLE_EMISSION_MAX_INSERTED_TOKENS = 2
+LCB_VARIABLE_EMISSION_CONTEXT_RADIUS = 3
+LCB_VARIABLE_EMISSION_MAX_CONTEXTS = 512
+LCB_VARIABLE_EMISSION_MAX_BPB_REGRESSION = 0.02
 STRING_LEXICON_REPAIR = False
 STRING_LEXICON_MAX_TOKENS = 100_000
 STRING_LEXICON_NODES = 512
@@ -1148,6 +1153,8 @@ def variable_emission_repair(
     ref_ids: np.ndarray,
     mapping: np.ndarray,
     target_vocab_size: int,
+    target_adapter=None,
+    byte_lm=None,
 ) -> dict[int, tuple[int, ...]]:
     if not VARIABLE_EMISSION_REPAIR or len(cipher_ids) > VARIABLE_EMISSION_MAX_TOKENS:
         return {}
@@ -1280,17 +1287,61 @@ def variable_emission_repair(
 
     emissions: dict[int, tuple[int, ...]] = {}
     proposals: list[tuple[float, int, tuple[int, int], float]] = []
+    lcb_reject_direction = 0
+    lcb_reject_byte = 0
+
+    def byte_lm_accepts(c_int: int, pair: tuple[int, int]) -> bool:
+        if target_adapter is None or byte_lm is None:
+            return True
+        positions: list[int] = []
+        for pos, token in enumerate(cipher_ids):
+            if int(token) == c_int:
+                positions.append(pos)
+                if len(positions) >= LCB_VARIABLE_EMISSION_MAX_CONTEXTS:
+                    break
+        if not positions:
+            return True
+        old_bits = 0.0
+        new_bits = 0.0
+        total_bytes = 0
+        for pos in positions:
+            start = max(0, pos - LCB_VARIABLE_EMISSION_CONTEXT_RADIUS)
+            stop = min(len(cipher_ids), pos + LCB_VARIABLE_EMISSION_CONTEXT_RADIUS + 1)
+            old_ids: list[int] = []
+            new_ids: list[int] = []
+            for token in cipher_ids[start:stop]:
+                tok = int(token)
+                mapped = int(mapping[tok])
+                old_ids.append(mapped)
+                if tok == c_int:
+                    new_ids.extend([int(pair[0]), int(pair[1])])
+                else:
+                    new_ids.append(mapped)
+            old_text = target_adapter.decode(old_ids)
+            new_text = target_adapter.decode(new_ids)
+            old_chunk_bits, _ = lm_total_bits(byte_lm, old_text)
+            new_chunk_bits, nbytes = lm_total_bits(byte_lm, new_text)
+            old_bits += old_chunk_bits
+            new_bits += new_chunk_bits
+            total_bytes += nbytes
+        if total_bytes <= 0:
+            return True
+        return (new_bits - old_bits) / total_bytes <= LCB_VARIABLE_EMISSION_MAX_BPB_REGRESSION
+
     for row, c in enumerate(repair_arr):
         c_int = int(c)
         current = int(mapping[c_int])
         current_idx = candidate_pos.get(current)
         if current_idx is None:
             continue
-        current_score = float(c_left[row] @ log_context_to_candidate[:, current_idx])
-        current_score += float(c_right[row] @ log_candidate_to_context[current_idx, :])
+        current_left = float(c_left[row] @ log_context_to_candidate[:, current_idx])
+        current_right = float(c_right[row] @ log_candidate_to_context[current_idx, :])
+        current_score = current_left + current_right
         occ = max(1.0, float(c_counts[c_int]))
         best_pair: tuple[int, int] | None = None
         best_score = current_score
+        best_left_gain = 0.0
+        best_right_gain = 0.0
         local_pairs = candidates_by_c.get(c_int, [])
         if VARIABLE_EMISSION_FREE_LOCAL_PAIRS:
             local_tokens = sorted({tok for pair in local_pairs for tok in pair} | {current})
@@ -1314,26 +1365,49 @@ def variable_emission_repair(
             second_idx = candidate_pos.get(second)
             if first_idx is None or second_idx is None:
                 continue
-            score = float(c_left[row] @ log_context_to_candidate[:, first_idx])
+            left_score = float(c_left[row] @ log_context_to_candidate[:, first_idx])
+            right_score = float(c_right[row] @ log_candidate_to_context[second_idx, :])
+            score = left_score
             score += occ * internal_log(first, second)
-            score += float(c_right[row] @ log_candidate_to_context[second_idx, :])
+            score += right_score
             if score > best_score:
                 best_score = score
                 best_pair = (first, second)
+                best_left_gain = left_score - current_left
+                best_right_gain = right_score - current_right
         if best_pair is None:
             continue
         gain_per_occ = (best_score - current_score) / occ
         if gain_per_occ >= VARIABLE_EMISSION_MIN_GAIN_PER_OCC:
+            if LCB_VARIABLE_EMISSION_REPAIR:
+                if best_left_gain <= 0.0 or best_right_gain <= 0.0:
+                    lcb_reject_direction += 1
+                    continue
+                if not byte_lm_accepts(c_int, best_pair):
+                    lcb_reject_byte += 1
+                    continue
             proposals.append((gain_per_occ, c_int, best_pair, occ))
 
     proposals.sort(reverse=True)
-    for gain, c, pair, _ in proposals[:VARIABLE_EMISSION_MAX_ACCEPTED]:
+    inserted = 0
+    for gain, c, pair, _ in proposals:
+        if len(emissions) >= VARIABLE_EMISSION_MAX_ACCEPTED:
+            break
+        if LCB_VARIABLE_EMISSION_REPAIR and inserted + (len(pair) - 1) > LCB_VARIABLE_EMISSION_MAX_INSERTED_TOKENS:
+            continue
         emissions[c] = pair
+        inserted += len(pair) - 1
     print(
         f"variable_emission_nodes={len(repair_arr)} candidates={sum(len(v) for v in candidates_by_c.values())} "
         f"proposals={len(proposals)} accepted={len(emissions)}",
         flush=True,
     )
+    if LCB_VARIABLE_EMISSION_REPAIR:
+        print(
+            f"variable_emission_lcb_reject_direction={lcb_reject_direction} "
+            f"reject_byte={lcb_reject_byte} inserted_tokens={inserted}",
+            flush=True,
+        )
     if proposals:
         gains = np.asarray([p[0] for p in proposals], dtype=np.float32)
         print(f"variable_emission_gain_per_occ_median={float(np.median(gains)):.6f}", flush=True)
@@ -1811,7 +1885,14 @@ def main() -> None:
     print(f"reference_tokens: {len(task.ref_ids):,}")
 
     mapping = align_shuffled(task.cipher_ids, task.ref_ids, task.target_adapter.spec.vocab_size)
-    emissions = variable_emission_repair(task.cipher_ids, task.ref_ids, mapping, task.target_adapter.spec.vocab_size)
+    emissions = variable_emission_repair(
+        task.cipher_ids,
+        task.ref_ids,
+        mapping,
+        task.target_adapter.spec.vocab_size,
+        task.target_adapter,
+        task.byte_lm,
+    )
     string_overrides = string_lexicon_repair(
         task.cipher_ids,
         mapping,
