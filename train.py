@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import torch
 
 from prepare import (
     CACHE_DIR,
@@ -42,6 +43,24 @@ SINGLE_CANDIDATES = 12
 PAIR_CANDIDATES = 16
 REFERENCE_SPAN_BYTES = 2_000_000
 REFERENCE_SPANS_PER_BUCKET = 64
+CHANNEL_INITIALIZER = os.environ.get("DETOK_CHANNEL_INITIALIZER", "1") == "1"
+CHANNEL_FOCUS = 50_000
+CHANNEL_ANCHORS = 2_048
+CHANNEL_TRAIN_ANCHORS = 1_024
+CHANNEL_TOPK = 24
+CHANNEL_CONTEXT_CHUNK = 5_000_000
+CHANNEL_TRAIN_STEPS = 320
+CHANNEL_LR = 0.003
+CHANNEL_TEMP = 0.07
+CHANNEL_SKIP_WEIGHT = 0.35
+CHANNEL_RANK_PENALTY = 0.012
+CHANNEL_LOGIT_WEIGHT = 2.0
+CHANNEL_EMBED_DIM = 256
+CHANNEL_UPDATE_MAPPING = os.environ.get("DETOK_CHANNEL_UPDATE_MAPPING", "0") == "1"
+CHANNEL_SELF_TRAIN_ROUNDS = 2
+CHANNEL_SELF_TRAIN_PAIRS = 2_048
+CHANNEL_SELF_TRAIN_MIN_MARGIN = 0.01
+CHANNEL_KEEP_FREQ_ANCHORS = 256
 
 ISLAND_WINDOW = 8
 ISLAND_CONTEXT = 8
@@ -144,6 +163,238 @@ def build_initial_rank_mapping(
     return mapping, c_rank, p_rank, c_counts, p_counts
 
 
+def torch_context_maps(ids: np.ndarray, focus: np.ndarray, anchors: np.ndarray, device: str, offset: int = 1):
+    vocab_floor = int(max(int(ids.max(initial=0)), int(focus.max(initial=0)), int(anchors.max(initial=0)))) + 1
+    focus_lookup = torch.full((vocab_floor,), -1, dtype=torch.int32, device=device)
+    anchor_lookup = torch.full((vocab_floor,), -1, dtype=torch.int32, device=device)
+    focus_lookup[torch.as_tensor(focus.astype(np.int64), dtype=torch.long, device=device)] = torch.arange(
+        len(focus), dtype=torch.int32, device=device
+    )
+    anchor_lookup[torch.as_tensor(anchors.astype(np.int64), dtype=torch.long, device=device)] = torch.arange(
+        len(anchors), dtype=torch.int32, device=device
+    )
+    left_flat = torch.zeros(len(focus) * len(anchors), dtype=torch.float32, device=device)
+    right_flat = torch.zeros_like(left_flat)
+    base = len(anchors)
+    for start in range(0, max(0, len(ids) - offset), CHANNEL_CONTEXT_CHUNK):
+        stop = min(len(ids) - offset, start + CHANNEL_CONTEXT_CHUNK)
+        prev = torch.as_tensor(ids[start:stop].astype(np.int64, copy=False), dtype=torch.long, device=device)
+        nxt = torch.as_tensor(
+            ids[start + offset : stop + offset].astype(np.int64, copy=False),
+            dtype=torch.long,
+            device=device,
+        )
+        prev_ok = prev < vocab_floor
+        nxt_ok = nxt < vocab_floor
+
+        fi_b = torch.full_like(nxt, -1, dtype=torch.int32)
+        ai = torch.full_like(prev, -1, dtype=torch.int32)
+        fi_a = torch.full_like(prev, -1, dtype=torch.int32)
+        bi = torch.full_like(nxt, -1, dtype=torch.int32)
+        fi_b[nxt_ok] = focus_lookup[nxt[nxt_ok]]
+        ai[prev_ok] = anchor_lookup[prev[prev_ok]]
+        fi_a[prev_ok] = focus_lookup[prev[prev_ok]]
+        bi[nxt_ok] = anchor_lookup[nxt[nxt_ok]]
+
+        mask = (fi_b >= 0) & (ai >= 0)
+        if bool(mask.any()):
+            flat = fi_b[mask].to(torch.long) * base + ai[mask].to(torch.long)
+            left_flat += torch.bincount(flat, minlength=left_flat.numel()).to(torch.float32)
+
+        mask = (fi_a >= 0) & (bi >= 0)
+        if bool(mask.any()):
+            flat = fi_a[mask].to(torch.long) * base + bi[mask].to(torch.long)
+            right_flat += torch.bincount(flat, minlength=right_flat.numel()).to(torch.float32)
+    return left_flat.view(len(focus), len(anchors)), right_flat.view(len(focus), len(anchors))
+
+
+def normalize_torch_features(x: torch.Tensor, token_counts: np.ndarray, focus: np.ndarray, device: str) -> torch.Tensor:
+    counts_t = torch.as_tensor(
+        np.maximum(1.0, token_counts[focus].astype(np.float32)),
+        dtype=torch.float32,
+        device=device,
+    )
+    x = x / torch.sqrt(counts_t)[:, None]
+    return x / torch.linalg.vector_norm(x, dim=1, keepdim=True).clamp_min(1.0e-12)
+
+
+def learned_channel_candidates(
+    cipher_ids: np.ndarray,
+    ref_ids: np.ndarray,
+    mapping: np.ndarray,
+    c_rank: np.ndarray,
+    p_rank: np.ndarray,
+    c_counts: np.ndarray,
+    p_counts: np.ndarray,
+    target_adapter,
+    piece_cache: dict[int, str],
+) -> dict[int, list[tuple[float, int, str]]]:
+    if not CHANNEL_INITIALIZER:
+        return {}
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    c_order = np.argsort(-c_counts)
+    p_order = np.argsort(-p_counts)
+    c_focus = c_order[c_counts[c_order] > 0][:CHANNEL_FOCUS].astype(np.int64)
+    p_focus = p_order[p_counts[p_order] > 0][:CHANNEL_FOCUS].astype(np.int64)
+    anchors = min(CHANNEL_ANCHORS, len(c_focus), len(p_focus))
+    if anchors < 128:
+        return {}
+    c_anchors = c_focus[:anchors]
+    p_anchors = p_focus[:anchors]
+
+    print(f"channel_device={device}", flush=True)
+    print(f"channel_focus={len(c_focus)} target_focus={len(p_focus)} anchors={anchors}", flush=True)
+    with torch.no_grad():
+        c_left, c_right = torch_context_maps(cipher_ids, c_focus, c_anchors, device)
+        p_left, p_right = torch_context_maps(ref_ids, p_focus, p_anchors, device)
+        c_parts = [c_left, c_right]
+        p_parts = [p_left, p_right]
+        if CHANNEL_SKIP_WEIGHT > 0:
+            c_left2, c_right2 = torch_context_maps(cipher_ids, c_focus, c_anchors, device, offset=2)
+            p_left2, p_right2 = torch_context_maps(ref_ids, p_focus, p_anchors, device, offset=2)
+            c_parts.extend([c_left2 * CHANNEL_SKIP_WEIGHT, c_right2 * CHANNEL_SKIP_WEIGHT])
+            p_parts.extend([p_left2 * CHANNEL_SKIP_WEIGHT, p_right2 * CHANNEL_SKIP_WEIGHT])
+        c_feat = normalize_torch_features(torch.cat(c_parts, dim=1), c_counts, c_focus, device)
+        p_feat = normalize_torch_features(torch.cat(p_parts, dim=1), p_counts, p_focus, device)
+        del c_parts, p_parts, c_left, c_right, p_left, p_right
+        if CHANNEL_SKIP_WEIGHT > 0:
+            del c_left2, c_right2, p_left2, p_right2
+
+    def project_features() -> tuple[torch.Tensor, torch.Tensor]:
+        c_emb = c_proj(c_feat)
+        p_emb = p_proj(p_feat)
+        c_emb = c_emb / torch.linalg.vector_norm(c_emb, dim=1, keepdim=True).clamp_min(1.0e-12)
+        p_emb = p_emb / torch.linalg.vector_norm(p_emb, dim=1, keepdim=True).clamp_min(1.0e-12)
+        return c_emb, p_emb
+
+    def train_pairs(c_rows: torch.Tensor, p_rows: torch.Tensor, steps: int) -> float:
+        target = torch.arange(len(c_rows), dtype=torch.long, device=device)
+        for _ in range(steps):
+            optimizer.zero_grad(set_to_none=True)
+            c_emb, p_emb = project_features()
+            logits = (c_emb[c_rows] @ p_emb[p_rows].T) / CHANNEL_TEMP
+            loss = 0.5 * (
+                torch.nn.functional.cross_entropy(logits, target)
+                + torch.nn.functional.cross_entropy(logits.T, target)
+            )
+            loss.backward()
+            optimizer.step()
+        with torch.no_grad():
+            c_emb, p_emb = project_features()
+            pred = (c_emb[c_rows] @ p_emb[p_rows].T).argmax(dim=1)
+            return float((pred == target).float().mean().detach().cpu())
+
+    def induce_mutual_pairs() -> tuple[np.ndarray, np.ndarray, int]:
+        with torch.no_grad():
+            c_emb, p_emb = project_features()
+            best_p = torch.empty(len(c_focus), dtype=torch.long, device=device)
+            best_score = torch.empty(len(c_focus), dtype=torch.float32, device=device)
+            best_margin = torch.empty(len(c_focus), dtype=torch.float32, device=device)
+            inv_score = torch.full((len(p_focus),), -1.0e9, dtype=torch.float32, device=device)
+            inv_c = torch.full((len(p_focus),), -1, dtype=torch.long, device=device)
+            p_rank_t = torch.as_tensor(p_rank[p_focus].astype(np.float32), dtype=torch.float32, device=device)
+            for start in range(0, len(c_focus), 256):
+                stop = min(len(c_focus), start + 256)
+                scores = c_emb[start:stop] @ p_emb.T
+                if CHANNEL_RANK_PENALTY > 0:
+                    centers = torch.as_tensor(c_rank[c_focus[start:stop]].astype(np.float32), dtype=torch.float32, device=device)
+                    scores -= CHANNEL_RANK_PENALTY * torch.log1p(torch.abs(p_rank_t[None, :] - centers[:, None]))
+                vals, idx = torch.topk(scores, k=2, dim=1)
+                best_p[start:stop] = idx[:, 0]
+                best_score[start:stop] = vals[:, 0]
+                best_margin[start:stop] = vals[:, 0] - vals[:, 1]
+                col_vals, col_rows = scores.max(dim=0)
+                mask = col_vals > inv_score
+                inv_score[mask] = col_vals[mask]
+                inv_c[mask] = col_rows[mask] + start
+
+            rows = torch.arange(len(c_focus), dtype=torch.long, device=device)
+            mutual = inv_c[best_p] == rows
+            mutual &= best_margin >= CHANNEL_SELF_TRAIN_MIN_MARGIN
+            mutual_rows = rows[mutual]
+            if len(mutual_rows) == 0:
+                c_seed = np.arange(min(CHANNEL_KEEP_FREQ_ANCHORS, anchors), dtype=np.int64)
+                return c_seed, c_seed, 0
+            score = best_score[mutual_rows] + best_margin[mutual_rows]
+            order = torch.argsort(score, descending=True)[:CHANNEL_SELF_TRAIN_PAIRS]
+            c_rows = mutual_rows[order].detach().cpu().numpy().astype(np.int64)
+            p_rows = best_p[mutual_rows[order]].detach().cpu().numpy().astype(np.int64)
+            keep = min(CHANNEL_KEEP_FREQ_ANCHORS, anchors)
+            if keep:
+                c_rows = np.concatenate([np.arange(keep, dtype=np.int64), c_rows])
+                p_rows = np.concatenate([np.arange(keep, dtype=np.int64), p_rows])
+            seen: set[tuple[int, int]] = set()
+            uniq_c: list[int] = []
+            uniq_p: list[int] = []
+            for c_row, p_row in zip(c_rows, p_rows):
+                key = (int(c_row), int(p_row))
+                if key in seen:
+                    continue
+                seen.add(key)
+                uniq_c.append(int(c_row))
+                uniq_p.append(int(p_row))
+            return np.asarray(uniq_c, dtype=np.int64), np.asarray(uniq_p, dtype=np.int64), int(mutual.sum().detach().cpu())
+
+    train_n = min(CHANNEL_TRAIN_ANCHORS, anchors)
+    c_proj = torch.nn.Linear(c_feat.shape[1], CHANNEL_EMBED_DIM, bias=False, device=device)
+    p_proj = torch.nn.Linear(p_feat.shape[1], CHANNEL_EMBED_DIM, bias=False, device=device)
+    torch.nn.init.normal_(c_proj.weight, mean=0.0, std=0.02)
+    torch.nn.init.normal_(p_proj.weight, mean=0.0, std=0.02)
+    optimizer = torch.optim.AdamW(list(c_proj.parameters()) + list(p_proj.parameters()), lr=CHANNEL_LR, weight_decay=1.0e-4)
+    train_top1 = train_pairs(
+        torch.arange(train_n, dtype=torch.long, device=device),
+        torch.arange(train_n, dtype=torch.long, device=device),
+        CHANNEL_TRAIN_STEPS,
+    )
+    for round_idx in range(CHANNEL_SELF_TRAIN_ROUNDS):
+        c_rows_np, p_rows_np, mutual_count = induce_mutual_pairs()
+        if len(c_rows_np) < 128:
+            print(f"channel_self_train_round={round_idx + 1} mutual={mutual_count} skipped=1", flush=True)
+            break
+        train_top1 = train_pairs(
+            torch.as_tensor(c_rows_np, dtype=torch.long, device=device),
+            torch.as_tensor(p_rows_np, dtype=torch.long, device=device),
+            max(40, CHANNEL_TRAIN_STEPS // 2),
+        )
+        print(
+            f"channel_self_train_round={round_idx + 1} mutual={mutual_count} pairs={len(c_rows_np)} top1={train_top1:.4f}",
+            flush=True,
+        )
+    with torch.no_grad():
+        c_feat, p_feat = project_features()
+        p_rank_t = torch.as_tensor(p_rank[p_focus].astype(np.float32), dtype=torch.float32, device=device)
+        channel: dict[int, list[tuple[float, int, str]]] = {}
+        for start in range(0, len(c_focus), 256):
+            stop = min(len(c_focus), start + 256)
+            c_ids = c_focus[start:stop]
+            scores = c_feat[start:stop] @ p_feat.T
+            if CHANNEL_RANK_PENALTY > 0:
+                centers = torch.as_tensor(c_rank[c_ids].astype(np.float32), dtype=torch.float32, device=device)
+                scores -= CHANNEL_RANK_PENALTY * torch.log1p(torch.abs(p_rank_t[None, :] - centers[:, None]))
+            values, indices = torch.topk(scores, k=min(CHANNEL_TOPK, len(p_focus)), dim=1)
+            for row, c in enumerate(c_ids):
+                bucket: list[tuple[float, int, str]] = []
+                seen: set[str] = set()
+                for value, col in zip(values[row].detach().cpu().tolist(), indices[row].detach().cpu().tolist()):
+                    p = int(p_focus[int(col)])
+                    piece = target_piece(target_adapter, p, piece_cache)
+                    if piece in seen or not valid_piece(piece):
+                        continue
+                    seen.add(piece)
+                    bucket.append((float(value), p, piece))
+                    if len(bucket) >= CHANNEL_TOPK:
+                        break
+                if bucket:
+                    channel[int(c)] = bucket
+                    if CHANNEL_UPDATE_MAPPING:
+                        mapping[int(c)] = bucket[0][1]
+        print(f"channel_train_top1={train_top1:.4f}", flush=True)
+        print(f"channel_candidates={len(channel)}", flush=True)
+    if device == "cuda":
+        torch.cuda.empty_cache()
+    return channel
+
+
 def add_candidate(out: list[tuple[str, float]], seen: set[str], piece: str, score: float) -> None:
     if piece in seen or not valid_piece(piece):
         return
@@ -159,6 +410,7 @@ class CandidateState:
     p_order: np.ndarray
     target_adapter: object
     piece_cache: dict[int, str]
+    channel_candidates: dict[int, list[tuple[float, int, str]]]
     single_cache: dict[int, list[tuple[str, float]]]
     pair_cache: dict[tuple[int, int], list[tuple[str, float]]]
     reference_spans: dict[tuple[str, int], list[str]]
@@ -175,6 +427,16 @@ def singleton_candidates(state: CandidateState, c: int) -> list[tuple[str, float
     out: list[tuple[str, float]] = []
     seen: set[str] = set()
     add_candidate(out, seen, current_piece, 0.0)
+    channel = state.channel_candidates.get(c)
+    if channel:
+        top = channel[0][0]
+        for rank, (score, _, piece) in enumerate(channel[:SINGLE_CANDIDATES]):
+            if not class_compatible(current_piece, piece):
+                continue
+            prior = CHANNEL_LOGIT_WEIGHT * float(score - top) - ALT_PENALTY * (rank > 0)
+            add_candidate(out, seen, piece, prior)
+        state.single_cache[c] = out[:SINGLE_CANDIDATES]
+        return state.single_cache[c]
 
     center = int(min(max(state.c_rank[c], 0), len(state.p_order) - 1))
     lo = max(0, center - RANK_WINDOW)
@@ -353,13 +615,26 @@ def graphless_segmental_decode(task) -> str:
         task.target_adapter.spec.vocab_size,
     )
     p_order = np.argsort(-p_counts)
+    piece_cache: dict[int, str] = {}
+    channel_candidates = learned_channel_candidates(
+        task.cipher_ids,
+        task.ref_ids,
+        mapping,
+        c_rank,
+        p_rank,
+        counts(task.cipher_ids, len(mapping)),
+        p_counts,
+        task.target_adapter,
+        piece_cache,
+    )
     state = CandidateState(
         mapping=mapping,
         c_rank=c_rank,
         p_rank=p_rank,
         p_order=p_order,
         target_adapter=task.target_adapter,
-        piece_cache={},
+        piece_cache=piece_cache,
+        channel_candidates=channel_candidates,
         single_cache={},
         pair_cache={},
         reference_spans=build_reference_span_inventory(task.reference_text),
@@ -389,6 +664,7 @@ def graphless_segmental_decode(task) -> str:
         gains.append(gain)
 
     print(f"rank_init_focus={min(FOCUS_TYPES, len(np.unique(task.cipher_ids)))}", flush=True)
+    print(f"channel_candidate_types={len(channel_candidates)}", flush=True)
     print(f"segmental_islands={len(islands)} accepted={accepted} span2_used={span2_used}", flush=True)
     if gains:
         arr = np.asarray(gains, dtype=np.float32)
