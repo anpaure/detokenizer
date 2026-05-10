@@ -71,6 +71,11 @@ BIGRAM_REFINE_ALPHA = 0.05
 BIGRAM_UNIGRAM_BACKOFF = True
 BIGRAM_UNIGRAM_BACKOFF_TAU = 1000.0
 BIGRAM_UNIGRAM_BACKOFF_MAX_TOKENS = 100_000
+TAIL_REPAIR_MAX_TOKENS = 100_000
+TAIL_REPAIR_NODES = 1_024
+TAIL_REPAIR_CONTEXTS = 8_192
+TAIL_REPAIR_CANDIDATES = 8
+TAIL_REPAIR_MIN_GAIN_PER_OCC = 0.15
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -247,6 +252,30 @@ def dense_bigram_counts(ids: np.ndarray, nodes: np.ndarray, vocab_floor: int, of
     return np.bincount(flat, minlength=k * k).reshape(k, k).astype(np.float32)
 
 
+def dense_cross_bigram_counts(
+    ids: np.ndarray,
+    left_nodes: np.ndarray,
+    right_nodes: np.ndarray,
+    vocab_floor: int,
+    offset: int = 1,
+) -> np.ndarray:
+    left_lookup = np.full(vocab_floor, -1, dtype=np.int32)
+    right_lookup = np.full(vocab_floor, -1, dtype=np.int32)
+    left_valid = left_nodes < vocab_floor
+    right_valid = right_nodes < vocab_floor
+    left_lookup[left_nodes[left_valid]] = np.arange(len(left_nodes), dtype=np.int32)[left_valid]
+    right_lookup[right_nodes[right_valid]] = np.arange(len(right_nodes), dtype=np.int32)[right_valid]
+    prev = left_lookup[ids[:-offset]]
+    nxt = right_lookup[ids[offset:]]
+    mask = (prev >= 0) & (nxt >= 0)
+    rows = len(left_nodes)
+    cols = len(right_nodes)
+    if not bool(mask.any()):
+        return np.zeros((rows, cols), dtype=np.float32)
+    flat = prev[mask].astype(np.int64, copy=False) * cols + nxt[mask].astype(np.int64, copy=False)
+    return np.bincount(flat, minlength=rows * cols).reshape(rows, cols).astype(np.float32)
+
+
 def bigram_swap_delta(c_big: np.ndarray, p_log: np.ndarray, perm: np.ndarray, a: int, b: int) -> float:
     pa = int(perm[a])
     pb = int(perm[b])
@@ -376,6 +405,111 @@ def refine_with_bigram_objective(
     print(f"bigram_refine_passes={passes_run}", flush=True)
     print(f"bigram_refine_swaps={swaps}", flush=True)
     return mapping
+
+
+def tail_unary_repair(
+    cipher_ids: np.ndarray,
+    ref_ids: np.ndarray,
+    mapping: np.ndarray,
+    c_counts: np.ndarray,
+    p_counts: np.ndarray,
+    c_focus: np.ndarray,
+    edges: list[tuple[float, int, int]],
+    target_vocab_size: int,
+) -> np.ndarray:
+    if len(cipher_ids) > TAIL_REPAIR_MAX_TOKENS or TAIL_REPAIR_NODES <= 0:
+        return mapping
+    start = min(BIGRAM_REFINE_TOKENS, len(c_focus))
+    tail_nodes = c_focus[start : min(len(c_focus), start + TAIL_REPAIR_NODES)]
+    if len(tail_nodes) < 64:
+        return mapping
+
+    context_c: list[int] = []
+    context_p: list[int] = []
+    seen_p: set[int] = set()
+    for c in c_focus[: max(TAIL_REPAIR_CONTEXTS * 2, TAIL_REPAIR_CONTEXTS)]:
+        c_int = int(c)
+        p_int = int(mapping[c_int])
+        if p_int < 0 or p_int >= target_vocab_size or p_int in seen_p:
+            continue
+        context_c.append(c_int)
+        context_p.append(p_int)
+        seen_p.add(p_int)
+        if len(context_c) >= TAIL_REPAIR_CONTEXTS:
+            break
+    if len(context_c) < 64:
+        return mapping
+
+    tail_set = set(map(int, tail_nodes))
+    candidates_by_c: dict[int, list[int]] = {int(c): [int(mapping[int(c)])] for c in tail_nodes}
+    for _, c, p in edges:
+        if c not in tail_set:
+            continue
+        cand = candidates_by_c[int(c)]
+        p_int = int(p)
+        if len(cand) >= TAIL_REPAIR_CANDIDATES:
+            continue
+        if p_int < 0 or p_int >= target_vocab_size or p_int in cand:
+            continue
+        cand.append(p_int)
+
+    candidate_p: list[int] = []
+    candidate_pos: dict[int, int] = {}
+    for cand in candidates_by_c.values():
+        for p in cand:
+            if p not in candidate_pos:
+                candidate_pos[p] = len(candidate_p)
+                candidate_p.append(p)
+    if len(candidate_p) < 64:
+        return mapping
+
+    tail_arr = np.asarray(list(candidates_by_c.keys()), dtype=np.int64)
+    context_c_arr = np.asarray(context_c, dtype=np.int64)
+    context_p_arr = np.asarray(context_p, dtype=np.int64)
+    candidate_p_arr = np.asarray(candidate_p, dtype=np.int64)
+    c_right = dense_cross_bigram_counts(cipher_ids, tail_arr, context_c_arr, len(mapping))
+    c_left = dense_cross_bigram_counts(cipher_ids, context_c_arr, tail_arr, len(mapping)).T
+    p_right = dense_cross_bigram_counts(ref_ids, candidate_p_arr, context_p_arr, target_vocab_size)
+    p_left = dense_cross_bigram_counts(ref_ids, context_p_arr, candidate_p_arr, target_vocab_size)
+    p_right_log = np.log(
+        (p_right + BIGRAM_REFINE_ALPHA)
+        / (p_right.sum(axis=1, keepdims=True) + BIGRAM_REFINE_ALPHA * len(context_p_arr))
+    ).astype(np.float32)
+    p_left_log = np.log(
+        (p_left + BIGRAM_REFINE_ALPHA)
+        / (p_left.sum(axis=1, keepdims=True) + BIGRAM_REFINE_ALPHA * len(candidate_p_arr))
+    ).astype(np.float32)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    with torch.no_grad():
+        scores = torch.as_tensor(c_right, dtype=torch.float32, device=device) @ torch.as_tensor(
+            p_right_log, dtype=torch.float32, device=device
+        ).T
+        scores.add_(
+            torch.as_tensor(c_left, dtype=torch.float32, device=device)
+            @ torch.as_tensor(p_left_log, dtype=torch.float32, device=device)
+        )
+        score_np = scores.cpu().numpy()
+
+    repaired = mapping.copy()
+    accepted = 0
+    for row, c in enumerate(tail_arr):
+        cand = candidates_by_c[int(c)]
+        if len(cand) <= 1:
+            continue
+        cand_idx = [candidate_pos[p] for p in cand]
+        cand_scores = score_np[row, cand_idx]
+        current_p = int(mapping[int(c)])
+        current_local = cand.index(current_p) if current_p in cand else 0
+        best_local = int(np.argmax(cand_scores))
+        gain = float(cand_scores[best_local] - cand_scores[current_local])
+        occ = max(1.0, float(c_counts[int(c)]))
+        if best_local == current_local or gain / occ < TAIL_REPAIR_MIN_GAIN_PER_OCC:
+            continue
+        repaired[int(c)] = cand[best_local]
+        accepted += 1
+    print(f"tail_repair_nodes={len(tail_arr)} candidates={len(candidate_p_arr)} accepted={accepted}", flush=True)
+    return repaired
 
 
 def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_size: int) -> np.ndarray:
@@ -522,6 +656,16 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
                 edges,
                 target_vocab_size,
                 p_counts,
+            )
+            mapping = tail_unary_repair(
+                cipher_ids,
+                ref_ids,
+                mapping,
+                c_counts,
+                p_counts,
+                c_focus,
+                edges,
+                target_vocab_size,
             )
         if use_dynamic_anchors and len(assigned_scores) >= 64:
             assigned_scores.sort(reverse=True)
