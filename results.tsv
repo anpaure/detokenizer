@@ -171,3 +171,4 @@ fc2bbb7	qwen36-o200k-100k-screen	0.456140	0.456140	2.718997	105.5	discard	owner-
 dfcc3a5	oracle-reranker-100k-diagnostic	0.668605	0.679743	0.000000	6.3	diagnostic	leave-one-pair-out oracle linear reranker improves raw edge top1 but loses to current repaired mapping top1 0.677249, so synthetic reranker path is not pursued
 14081d9	synthetic-reranker-100k-diagnostic	0.059179	0.074069	0.000000	6.3	discard	synthetic merge/split reranker failed held-out top1, coverage 41.4% and rerank top1 below current mapping
 cb47fad	synthetic-identity-reranker-100k-diagnostic	0.635449	0.660878	0.000000	6.3	diagnostic	identity synthetic reranker improves current top1 by only 0.78pp, below threshold for real assignment integration
+b024223	qwen36-o200k-100k-screen	0.462580	0.462580	2.708091	117.9	discard	class-context candidate scoring for alphanumeric/punctuation contexts regressed hard Qwen even at low weight
