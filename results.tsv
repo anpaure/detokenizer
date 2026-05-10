@@ -143,3 +143,4 @@ bf9d884	core-100k-gemma	0.457632	0.467700	2.662603	6.3	keep	stricter tail repair
 850cdc2	core-100k-gemma	0.457656	0.467380	2.662814	6.3	discard	tail repair threshold 0.35 improves suite max but loses mean CER and BPB versus accepted 0.30
 4f21204	qwen-mistral-gemma-100k-screen	0.461993	0.468380	2.689586	6.3	discard	smaller 768-token tail repair block loses coverage and regresses Qwen and Gemma screens
 a0b91fa	core-100k-gemma	0.456796	0.466480	2.658430	6.3	keep	larger 1280-token tail repair block improves Gemma-core 100k mean max and BPB despite Mistral regression
+bcb960a	core-100k-gemma	0.456392	0.466080	2.655394	6.3	keep	larger 1536-token tail repair block improves Gemma-core 100k mean max and BPB while worsening Mistral
