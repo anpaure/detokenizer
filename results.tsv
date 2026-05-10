@@ -151,3 +151,4 @@ dfd85ab	qwen36-o200k-100k-screen	0.451680	0.451680	2.693335	6.3	discard	high-mar
 2c77200	qwen-mistral-gemma-100k-screen	0.459920	0.464420	2.673779	6.3	discard	single strongest variable emission is CER-neutral on three-pair screen with only tiny BPB gain
 1406268	core-100k-gemma	0.456364	0.464420	2.649934	6.3	keep	free local-pair variable emission gives a tiny non-same-tokenizer 100k mean CER and BPB gain
 16a9052	qwen36-o200k-100k-oracle-audit	0.451460	0.451460	2.694996	6.3	diagnostic	union/graph top64 singleton oracle reaches 0.353360 CER, a 0.098100 gain; global candidate selection is the active bottleneck
+objective-audit	qwen36-o200k-100k-objective-alignment	0.451460	0.451460	2.694996	6.3	diagnostic	graph-top64 oracle improves CER to 0.353360 and BPB to 2.665580, but bigram/backoff objectives score it worse than baseline; move total top100 precision only 0.080

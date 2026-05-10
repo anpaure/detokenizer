@@ -9,6 +9,7 @@ cer50k.
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from pathlib import Path
@@ -40,6 +41,10 @@ SEED = int(os.environ.get("DETOK_SEED", DEFAULT_SEED))
 ENABLE_DIAGNOSTICS = os.environ.get("DETOK_DIAGNOSTICS", "1") != "0"
 ORACLE_AUDIT = os.environ.get("DETOK_ORACLE_AUDIT", "0") == "1"
 ORACLE_AUDIT_TYPES = int(os.environ.get("DETOK_ORACLE_AUDIT_TYPES", "8192"))
+OBJECTIVE_ALIGNMENT_AUDIT = os.environ.get("DETOK_OBJECTIVE_ALIGNMENT_AUDIT", "0") == "1"
+OBJECTIVE_MOVE_AUDIT_TYPES = int(os.environ.get("DETOK_OBJECTIVE_MOVE_AUDIT_TYPES", "2048"))
+OBJECTIVE_MOVE_AUDIT_TOPK = int(os.environ.get("DETOK_OBJECTIVE_MOVE_AUDIT_TOPK", "16"))
+SPARSE_CHANNEL_BETA = float(os.environ.get("DETOK_SPARSE_CHANNEL_BETA", "0.01"))
 
 TOP_TOKENS = 50_000
 ANCHORS = 8_192
@@ -1242,6 +1247,16 @@ def union_pools(*pools: dict[int, set[int]]) -> dict[int, set[int]]:
     return merged
 
 
+def graph_score_pool(edges: list[tuple[float, int, int]], per_token: int = 64) -> dict[int, dict[int, float]]:
+    pool: dict[int, dict[int, float]] = {}
+    for score, c, p in edges:
+        bucket = pool.setdefault(int(c), {})
+        if len(bucket) >= per_token:
+            continue
+        bucket.setdefault(int(p), float(score))
+    return pool
+
+
 def oracle_audit(task, mapping: np.ndarray, emissions: dict[int, tuple[int, ...]]) -> dict[str, object]:
     sample_cipher = task.cipher_ids[:SAMPLE_TOKENS]
     focus = LAST_C_FOCUS[: min(ORACLE_AUDIT_TYPES, len(LAST_C_FOCUS))]
@@ -1359,6 +1374,248 @@ def oracle_audit(task, mapping: np.ndarray, emissions: dict[int, tuple[int, ...]
     return audit
 
 
+def byte_bpb_for_mapping(task, mapping: np.ndarray, emissions: dict[int, tuple[int, ...]]) -> float:
+    text = decode_with_variable_emissions(task.cipher_ids[:SAMPLE_TOKENS], mapping, emissions, task.target_adapter)
+    return float(evaluate_recovery(task, text, SAMPLE_TOKENS)["byte_lm_bpb"])
+
+
+def sparse_channel_logprob(cipher_ids: np.ndarray, mapping: np.ndarray, focus: np.ndarray) -> float:
+    c_counts = counts(cipher_ids, int(max(len(mapping), int(cipher_ids.max(initial=0)) + 1)))
+    by_plain: dict[int, list[int]] = {}
+    for c in focus:
+        c_int = int(c)
+        p_int = int(mapping[c_int])
+        if c_counts[c_int] <= 0:
+            continue
+        by_plain.setdefault(p_int, []).append(c_int)
+    score = 0.0
+    for cipher_types in by_plain.values():
+        total = int(sum(int(c_counts[c]) for c in cipher_types))
+        k = max(1, len(cipher_types))
+        alpha = SPARSE_CHANNEL_BETA / k
+        score += math.lgamma(SPARSE_CHANNEL_BETA) - math.lgamma(SPARSE_CHANNEL_BETA + total)
+        for c in cipher_types:
+            count = int(c_counts[c])
+            score += math.lgamma(alpha + count) - math.lgamma(alpha)
+    return score
+
+
+def objective_scores_for_mapping(
+    task,
+    name: str,
+    mapping: np.ndarray,
+    emissions: dict[int, tuple[int, ...]],
+    focus: np.ndarray,
+    graph_scores: dict[int, dict[int, float]],
+) -> dict[str, float | str]:
+    target_vocab_size = task.target_adapter.spec.vocab_size
+    p_counts = counts(task.ref_ids, target_vocab_size)
+    c_big = dense_bigram_counts(task.cipher_ids, focus, len(mapping))
+    c_skip = dense_bigram_counts(task.cipher_ids, focus, len(mapping), offset=2)
+    p_nodes = np.unique(mapping[focus].astype(np.int64, copy=False))
+    p_big = dense_bigram_counts(task.ref_ids, p_nodes, target_vocab_size)
+    p_skip = dense_bigram_counts(task.ref_ids, p_nodes, target_vocab_size, offset=2)
+    p_pos = {int(p): i for i, p in enumerate(p_nodes)}
+    assign = np.asarray([p_pos[int(mapping[int(c)])] for c in focus], dtype=np.int64)
+    row_totals = p_big.sum(axis=1, keepdims=True)
+    p_probs = (p_big + BIGRAM_REFINE_ALPHA) / (row_totals + BIGRAM_REFINE_ALPHA * len(p_nodes))
+    unigram = p_counts[p_nodes].astype(np.float32)
+    unigram = (unigram + BIGRAM_REFINE_ALPHA) / (float(unigram.sum()) + BIGRAM_REFINE_ALPHA * len(p_nodes))
+    lam = row_totals / (row_totals + BIGRAM_UNIGRAM_BACKOFF_TAU)
+    p_backoff = lam * p_probs + (1.0 - lam) * unigram[None, :]
+    p_log = np.log(p_probs).astype(np.float32)
+    p_backoff_log = np.log(p_backoff).astype(np.float32)
+    skip_totals = p_skip.sum(axis=1, keepdims=True)
+    p_skip_log = np.log(
+        (p_skip + BIGRAM_REFINE_ALPHA) / (skip_totals + BIGRAM_REFINE_ALPHA * len(p_nodes))
+    ).astype(np.float32)
+    bigram_score = float((c_big * p_log[assign[:, None], assign[None, :]]).sum())
+    backoff_score = float((c_big * p_backoff_log[assign[:, None], assign[None, :]]).sum())
+    skip_score = float((c_skip * p_skip_log[assign[:, None], assign[None, :]]).sum())
+    graph_unary = 0.0
+    graph_hits = 0
+    for c in focus:
+        c_int = int(c)
+        p_int = int(mapping[c_int])
+        score = graph_scores.get(c_int, {}).get(p_int)
+        if score is not None:
+            graph_unary += float(score)
+            graph_hits += 1
+    unique_targets = len(set(map(int, mapping[focus])))
+    duplicates = len(focus) - unique_targets
+    sparse_score = sparse_channel_logprob(task.cipher_ids, mapping, focus)
+    text = decode_with_variable_emissions(task.cipher_ids[:SAMPLE_TOKENS], mapping, emissions, task.target_adapter)
+    metrics = evaluate_recovery(task, text, SAMPLE_TOKENS)
+    return {
+        "name": name,
+        "cer50k": float(metrics["cer50k"]),
+        "byte_bpb": float(metrics["byte_lm_bpb"]),
+        "bigram": bigram_score,
+        "bigram_backoff": backoff_score,
+        "skip": skip_score,
+        "graph_unary": graph_unary,
+        "graph_hits": float(graph_hits),
+        "duplicates": float(duplicates),
+        "sparse_channel": sparse_score,
+    }
+
+
+def auc_from_scores(scores: list[float], labels: list[int]) -> float:
+    positives = sum(labels)
+    negatives = len(labels) - positives
+    if positives == 0 or negatives == 0:
+        return 0.5
+    order = np.argsort(scores)
+    ranks = np.empty(len(scores), dtype=np.float64)
+    ranks[order] = np.arange(1, len(scores) + 1, dtype=np.float64)
+    pos_rank_sum = float(sum(ranks[i] for i, label in enumerate(labels) if label))
+    return (pos_rank_sum - positives * (positives + 1) / 2.0) / (positives * negatives)
+
+
+def objective_move_audit(
+    task,
+    mapping: np.ndarray,
+    focus: np.ndarray,
+    graph_scores: dict[int, dict[int, float]],
+    truth: dict[int, int],
+) -> list[dict[str, float | int | str]]:
+    audit_focus = focus[: min(OBJECTIVE_MOVE_AUDIT_TYPES, len(focus))]
+    target_vocab_size = task.target_adapter.spec.vocab_size
+    p_counts = counts(task.ref_ids, target_vocab_size)
+    candidate_targets = sorted(
+        {int(mapping[int(c)]) for c in audit_focus}
+        | {p for c in audit_focus for p in graph_scores.get(int(c), {}).keys()}
+    )
+    p_nodes = np.asarray(candidate_targets, dtype=np.int64)
+    p_pos = {int(p): i for i, p in enumerate(p_nodes)}
+    c_big = dense_bigram_counts(task.cipher_ids, audit_focus, len(mapping))
+    p_big = dense_bigram_counts(task.ref_ids, p_nodes, target_vocab_size)
+    row_totals = p_big.sum(axis=1, keepdims=True)
+    unigram = p_counts[p_nodes].astype(np.float32)
+    unigram = (unigram + BIGRAM_REFINE_ALPHA) / (float(unigram.sum()) + BIGRAM_REFINE_ALPHA * len(p_nodes))
+    p_probs = (p_big + BIGRAM_REFINE_ALPHA) / (row_totals + BIGRAM_REFINE_ALPHA * len(p_nodes))
+    lam = row_totals / (row_totals + BIGRAM_UNIGRAM_BACKOFF_TAU)
+    p_backoff = lam * p_probs + (1.0 - lam) * unigram[None, :]
+    p_log = np.log(p_probs).astype(np.float32)
+    p_backoff_log = np.log(p_backoff).astype(np.float32)
+    assign = np.asarray([p_pos[int(mapping[int(c)])] for c in audit_focus], dtype=np.int64)
+    owner_counts: dict[int, int] = {}
+    for p_idx in assign:
+        owner_counts[int(p_idx)] = owner_counts.get(int(p_idx), 0) + 1
+    feature_values: dict[str, list[float]] = {
+        "bigram_delta": [],
+        "backoff_delta": [],
+        "graph_delta": [],
+        "duplicate_delta": [],
+        "total_delta": [],
+    }
+    labels: list[int] = []
+    proposals: list[tuple[float, int]] = []
+    for i, c in enumerate(audit_focus):
+        c_int = int(c)
+        true_p = truth.get(c_int)
+        current_p = int(mapping[c_int])
+        current_idx = p_pos[current_p]
+        current_graph = graph_scores.get(c_int, {}).get(current_p, 0.0)
+        row_candidates = list(graph_scores.get(c_int, {}).keys())[:OBJECTIVE_MOVE_AUDIT_TOPK]
+        for p in row_candidates:
+            if int(p) == current_p:
+                continue
+            p_idx = p_pos[int(p)]
+            old_bigram = float(c_big[i] @ p_log[current_idx, assign]) + float(c_big[:, i] @ p_log[assign, current_idx])
+            new_bigram = float(c_big[i] @ p_log[p_idx, assign]) + float(c_big[:, i] @ p_log[assign, p_idx])
+            old_backoff = float(c_big[i] @ p_backoff_log[current_idx, assign]) + float(
+                c_big[:, i] @ p_backoff_log[assign, current_idx]
+            )
+            new_backoff = float(c_big[i] @ p_backoff_log[p_idx, assign]) + float(
+                c_big[:, i] @ p_backoff_log[assign, p_idx]
+            )
+            graph_delta = float(graph_scores.get(c_int, {}).get(int(p), -1.0) - current_graph)
+            duplicate_delta = -float(owner_counts.get(p_idx, 0))
+            bigram_delta = new_bigram - old_bigram
+            backoff_delta = new_backoff - old_backoff
+            total_delta = backoff_delta + 0.05 * graph_delta + 0.25 * duplicate_delta
+            label = int(true_p is not None and int(p) == true_p)
+            labels.append(label)
+            feature_values["bigram_delta"].append(bigram_delta)
+            feature_values["backoff_delta"].append(backoff_delta)
+            feature_values["graph_delta"].append(graph_delta)
+            feature_values["duplicate_delta"].append(duplicate_delta)
+            feature_values["total_delta"].append(total_delta)
+            proposals.append((total_delta, label))
+
+    rows: list[dict[str, float | int | str]] = []
+    for name, values in feature_values.items():
+        good = [v for v, label in zip(values, labels) if label]
+        bad = [v for v, label in zip(values, labels) if not label]
+        rows.append(
+            {
+                "feature": name,
+                "auc": auc_from_scores(values, labels),
+                "mean_good": float(np.mean(good)) if good else 0.0,
+                "mean_bad": float(np.mean(bad)) if bad else 0.0,
+            }
+        )
+    proposals.sort(reverse=True)
+    for topn in (100, 500, 1000):
+        top = proposals[: min(topn, len(proposals))]
+        rows.append(
+            {
+                "feature": f"total_top{topn}_precision",
+                "auc": float(sum(label for _score, label in top) / max(1, len(top))),
+                "mean_good": float(sum(label for _score, label in top)),
+                "mean_bad": float(len(top)),
+            }
+        )
+    return rows
+
+
+def objective_alignment_audit(task, mapping: np.ndarray, emissions: dict[int, tuple[int, ...]]) -> dict[str, object]:
+    focus = LAST_C_FOCUS[: min(ORACLE_AUDIT_TYPES, len(LAST_C_FOCUS))]
+    if len(focus) == 0:
+        return {}
+    graph_scores = graph_score_pool(LAST_FINAL_EDGES, TORCH_TOPK)
+    graph_pool = {c: set(scores.keys()) for c, scores in graph_scores.items()}
+    inv = inverse_permutation(task.perm)
+    truth: dict[int, int] = {}
+    for c in focus:
+        true_p, _piece, _cls = singleton_truth_for_cipher(task, int(c), inv)
+        if true_p is not None:
+            truth[int(c)] = true_p
+
+    mappings: list[tuple[str, np.ndarray, dict[int, tuple[int, ...]]]] = [("current_baseline", mapping, emissions)]
+    graph_oracle = mapping.copy()
+    for c, true_p in truth.items():
+        if true_p in graph_pool.get(c, set()):
+            graph_oracle[c] = true_p
+    mappings.append(("graph_top64_oracle", graph_oracle, {}))
+    true_top8192 = mapping.copy()
+    for c, true_p in truth.items():
+        true_top8192[c] = true_p
+    mappings.append(("true_singleton_top8192", true_top8192, {}))
+
+    score_rows = [
+        objective_scores_for_mapping(task, name, candidate_mapping, candidate_emissions, focus, graph_scores)
+        for name, candidate_mapping, candidate_emissions in mappings
+    ]
+    move_rows = objective_move_audit(task, mapping, focus, graph_scores, truth)
+    print("objective_alignment_rows:", flush=True)
+    for row in score_rows:
+        print(
+            f"  {row['name']}: cer={row['cer50k']:.6f} bpb={row['byte_bpb']:.6f} "
+            f"bigram={row['bigram']:.3f} backoff={row['bigram_backoff']:.3f} skip={row['skip']:.3f} "
+            f"graph={row['graph_unary']:.3f} dup={row['duplicates']:.0f} sparse={row['sparse_channel']:.3f}",
+            flush=True,
+        )
+    print("objective_move_audit:", flush=True)
+    for row in move_rows:
+        print(
+            f"  {row['feature']}: auc={row['auc']:.6f} mean_good={row['mean_good']:.6f} mean_bad={row['mean_bad']:.6f}",
+            flush=True,
+        )
+    return {"mapping_scores": score_rows, "move_scores": move_rows}
+
+
 def main() -> None:
     t0 = time.time()
     task = load_task(
@@ -1390,6 +1647,9 @@ def main() -> None:
     oracle_report: dict[str, object] = {}
     if ORACLE_AUDIT:
         oracle_report = oracle_audit(task, mapping, emissions)
+    objective_report: dict[str, object] = {}
+    if OBJECTIVE_ALIGNMENT_AUDIT:
+        objective_report = objective_alignment_audit(task, mapping, emissions)
 
     out_dir = CACHE_DIR / "runs"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1415,6 +1675,7 @@ def main() -> None:
         "variable_emission_repair": VARIABLE_EMISSION_REPAIR,
         "variable_emissions": len(emissions),
         "oracle_audit": oracle_report,
+        "objective_alignment_audit": objective_report,
         "diagnostics": diagnostics,
         "elapsed_seconds": time.time() - t0,
         "metrics": metrics,
