@@ -64,6 +64,9 @@ BIGRAM_REFINE_LARGE_TOKEN_MAX_TOKENS = 1_000_000
 BIGRAM_REFINE_MAX_PROPOSALS = 100_000
 BIGRAM_REFINE_PASSES = 4
 BIGRAM_REFINE_LARGE_PASSES = 3
+BIGRAM_REFINE_SKIP_WEIGHT = 0.5
+BIGRAM_REFINE_SKIP_MIN_TOKENS = 1_000_000
+BIGRAM_REFINE_SKIP_MAX_TOKENS = 1_000_000
 BIGRAM_REFINE_ALPHA = 0.05
 
 
@@ -227,12 +230,12 @@ def topk_edges(
     return edges
 
 
-def dense_bigram_counts(ids: np.ndarray, nodes: np.ndarray, vocab_floor: int) -> np.ndarray:
+def dense_bigram_counts(ids: np.ndarray, nodes: np.ndarray, vocab_floor: int, offset: int = 1) -> np.ndarray:
     lookup = np.full(vocab_floor, -1, dtype=np.int32)
     valid = nodes < vocab_floor
     lookup[nodes[valid]] = np.arange(len(nodes), dtype=np.int32)[valid]
-    prev = lookup[ids[:-1]]
-    nxt = lookup[ids[1:]]
+    prev = lookup[ids[:-offset]]
+    nxt = lookup[ids[offset:]]
     mask = (prev >= 0) & (nxt >= 0)
     k = len(nodes)
     if not bool(mask.any()):
@@ -296,10 +299,15 @@ def refine_with_bigram_objective(
     if k < 64:
         return mapping
 
+    use_skip_refine = BIGRAM_REFINE_SKIP_MIN_TOKENS <= len(cipher_ids) <= BIGRAM_REFINE_SKIP_MAX_TOKENS
     print(f"bigram_refine_token_budget={token_budget}", flush=True)
     print(f"bigram_refine_tokens={k}", flush=True)
+    print(f"bigram_refine_skip={use_skip_refine}", flush=True)
     c_big = dense_bigram_counts(cipher_ids, c_nodes, len(mapping))
     p_big = dense_bigram_counts(ref_ids, p_nodes, target_vocab_size)
+    if use_skip_refine:
+        c_big += BIGRAM_REFINE_SKIP_WEIGHT * dense_bigram_counts(cipher_ids, c_nodes, len(mapping), offset=2)
+        p_big += BIGRAM_REFINE_SKIP_WEIGHT * dense_bigram_counts(ref_ids, p_nodes, target_vocab_size, offset=2)
     row_totals = p_big.sum(axis=1, keepdims=True)
     p_log = np.log((p_big + BIGRAM_REFINE_ALPHA) / (row_totals + BIGRAM_REFINE_ALPHA * k)).astype(np.float32)
     perm = np.arange(k, dtype=np.int32)
