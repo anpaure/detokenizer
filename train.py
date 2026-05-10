@@ -85,8 +85,6 @@ EXTERNAL_OWNER_CONTEXTS = 8_192
 EXTERNAL_OWNER_CANDIDATES = 5
 EXTERNAL_OWNER_MIN_COUNT = 5
 EXTERNAL_OWNER_MIN_GAIN_PER_OCC = 0.35
-EXTERNAL_OWNER_JACKKNIFE = True
-EXTERNAL_OWNER_JACKKNIFE_MIN_GAIN_PER_OCC = 0.05
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -634,42 +632,31 @@ def external_owner_repair(
     candidate_p_arr = np.asarray(candidate_p, dtype=np.int64)
     c_right = dense_cross_bigram_counts(cipher_ids, repair_arr, context_c_arr, len(mapping))
     c_left = dense_cross_bigram_counts(cipher_ids, context_c_arr, repair_arr, len(mapping)).T
+    p_right = dense_cross_bigram_counts(ref_ids, candidate_p_arr, context_p_arr, target_vocab_size)
+    p_left = dense_cross_bigram_counts(ref_ids, context_p_arr, candidate_p_arr, target_vocab_size)
+    p_right_log = np.log(
+        (p_right + BIGRAM_REFINE_ALPHA)
+        / (p_right.sum(axis=1, keepdims=True) + BIGRAM_REFINE_ALPHA * len(context_p_arr))
+    ).astype(np.float32)
+    p_left_log = np.log(
+        (p_left + BIGRAM_REFINE_ALPHA)
+        / (p_left.sum(axis=1, keepdims=True) + BIGRAM_REFINE_ALPHA * len(candidate_p_arr))
+    ).astype(np.float32)
 
-    def score_matrix(reference_ids: np.ndarray) -> np.ndarray:
-        p_right = dense_cross_bigram_counts(reference_ids, candidate_p_arr, context_p_arr, target_vocab_size)
-        p_left = dense_cross_bigram_counts(reference_ids, context_p_arr, candidate_p_arr, target_vocab_size)
-        p_right_log = np.log(
-            (p_right + BIGRAM_REFINE_ALPHA)
-            / (p_right.sum(axis=1, keepdims=True) + BIGRAM_REFINE_ALPHA * len(context_p_arr))
-        ).astype(np.float32)
-        p_left_log = np.log(
-            (p_left + BIGRAM_REFINE_ALPHA)
-            / (p_left.sum(axis=1, keepdims=True) + BIGRAM_REFINE_ALPHA * len(candidate_p_arr))
-        ).astype(np.float32)
-
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        with torch.no_grad():
-            scores = torch.as_tensor(c_right, dtype=torch.float32, device=device) @ torch.as_tensor(
-                p_right_log, dtype=torch.float32, device=device
-            ).T
-            scores.add_(
-                torch.as_tensor(c_left, dtype=torch.float32, device=device)
-                @ torch.as_tensor(p_left_log, dtype=torch.float32, device=device)
-            )
-            return scores.cpu().numpy()
-
-    score_np = score_matrix(ref_ids)
-    score_a: np.ndarray | None = None
-    score_b: np.ndarray | None = None
-    if EXTERNAL_OWNER_JACKKNIFE and len(ref_ids) >= 2:
-        split = len(ref_ids) // 2
-        score_a = score_matrix(ref_ids[:split])
-        score_b = score_matrix(ref_ids[split:])
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    with torch.no_grad():
+        scores = torch.as_tensor(c_right, dtype=torch.float32, device=device) @ torch.as_tensor(
+            p_right_log, dtype=torch.float32, device=device
+        ).T
+        scores.add_(
+            torch.as_tensor(c_left, dtype=torch.float32, device=device)
+            @ torch.as_tensor(p_left_log, dtype=torch.float32, device=device)
+        )
+        score_np = scores.cpu().numpy()
 
     node_pos = {int(c): i for i, c in enumerate(repair_nodes)}
     p_pos = {int(p): i for i, p in enumerate(candidate_p)}
     proposals: list[tuple[float, int, int, int, int]] = []
-    jackknife_rejected = 0
     for c, p, owner in candidates:
         old_c = int(mapping[c])
         old_owner = int(mapping[owner])
@@ -687,14 +674,6 @@ def external_owner_repair(
         gain_per_occ = (new_score - old_score) / occ
         if gain_per_occ < EXTERNAL_OWNER_MIN_GAIN_PER_OCC:
             continue
-        if score_a is not None and score_b is not None:
-            old_a = float(score_a[ci, old_ci] + score_a[oi, pi])
-            new_a = float(score_a[ci, pi] + score_a[oi, old_ci])
-            old_b = float(score_b[ci, old_ci] + score_b[oi, pi])
-            new_b = float(score_b[ci, pi] + score_b[oi, old_ci])
-            if min((new_a - old_a) / occ, (new_b - old_b) / occ) < EXTERNAL_OWNER_JACKKNIFE_MIN_GAIN_PER_OCC:
-                jackknife_rejected += 1
-                continue
         proposals.append((gain_per_occ, c, p, owner, old_c))
 
     proposals.sort(reverse=True)
@@ -713,7 +692,6 @@ def external_owner_repair(
         used_targets.update((p, old_c))
         accepted += 1
     print(f"external_owner_candidates={len(candidates)} proposals={len(proposals)} accepted={accepted}", flush=True)
-    print(f"external_owner_jackknife={EXTERNAL_OWNER_JACKKNIFE} rejected={jackknife_rejected}", flush=True)
     if proposals:
         gains = np.asarray([p[0] for p in proposals], dtype=np.float32)
         print(f"external_owner_gain_per_occ_median={float(np.median(gains)):.6f}", flush=True)
