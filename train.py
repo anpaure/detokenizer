@@ -154,6 +154,10 @@ SYNTHETIC_RERANKER_TASKS = tuple(
     if item.strip()
 )
 SYNTHETIC_RERANKER_MIN_TOP1_GAIN = 0.03
+CLASS_CONTEXT_RERANK = os.environ.get("DETOK_CLASS_CONTEXT_RERANK", "0") == "1"
+CLASS_CONTEXT_MAX_TOKENS = 100_000
+CLASS_CONTEXT_WEIGHT = float(os.environ.get("DETOK_CLASS_CONTEXT_WEIGHT", "0.08"))
+CLASS_CONTEXT_NUM_CLASSES = 9
 
 LAST_FINAL_EDGES: list[tuple[float, int, int]] = []
 
@@ -292,6 +296,9 @@ def topk_edges(
     p_rank: np.ndarray,
     candidate_window: int,
     device: str,
+    c_extra: np.ndarray | None = None,
+    p_extra: np.ndarray | None = None,
+    extra_weight: float = 0.0,
 ) -> list[tuple[float, int, int]]:
     p_log_t = torch.as_tensor(p_log[p_focus].astype(np.float32), dtype=torch.float32, device=device)
     p_rank_t = torch.as_tensor(p_rank[p_focus].astype(np.int64), dtype=torch.long, device=device)
@@ -301,6 +308,11 @@ def topk_edges(
         stop = min(len(c_focus), start + TORCH_BATCH_SIZE)
         c_ids = c_focus[start:stop]
         sim = c_vec[start:stop] @ p_vec.T
+        if c_extra is not None and p_extra is not None and extra_weight != 0.0:
+            extra = torch.as_tensor(c_extra[start:stop], dtype=torch.float32, device=device) @ torch.as_tensor(
+                p_extra, dtype=torch.float32, device=device
+            ).T
+            sim += extra_weight * extra
         c_log_t = torch.as_tensor(c_log[c_ids].astype(np.float32), dtype=torch.float32, device=device)
         sim -= FREQ_WEIGHT * torch.abs(c_log_t[:, None] - p_log_t[None, :])
         if candidate_window > 0:
@@ -946,6 +958,7 @@ def align_shuffled(
     cipher_ids: np.ndarray,
     ref_ids: np.ndarray,
     target_vocab_size: int,
+    target_classes: np.ndarray | None = None,
 ) -> np.ndarray:
     global LAST_FINAL_EDGES
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -1015,6 +1028,20 @@ def align_shuffled(
             del c_parts, p_parts, c_left, c_right, p_left, p_right
             if use_skip_context:
                 del c_left2, c_right2, p_left2, p_right2
+            c_extra = None
+            p_extra = None
+            extra_weight = 0.0
+            if (
+                CLASS_CONTEXT_RERANK
+                and target_classes is not None
+                and len(cipher_ids) <= CLASS_CONTEXT_MAX_TOKENS
+            ):
+                mapped_classes = np.zeros(len(mapping), dtype=np.int16)
+                valid_mapping = (mapping >= 0) & (mapping < len(target_classes))
+                mapped_classes[valid_mapping] = target_classes[mapping[valid_mapping]]
+                c_extra = class_context_maps(cipher_ids, c_focus, mapped_classes, CLASS_CONTEXT_NUM_CLASSES)
+                p_extra = class_context_maps(ref_ids, p_focus, target_classes, CLASS_CONTEXT_NUM_CLASSES)
+                extra_weight = CLASS_CONTEXT_WEIGHT
             edges = topk_edges(
                 c_vec,
                 p_vec,
@@ -1026,6 +1053,9 @@ def align_shuffled(
                 p_rank,
                 candidate_window,
                 device,
+                c_extra,
+                p_extra,
+                extra_weight,
             )
             del c_vec, p_vec
             if device == "cuda":
@@ -1246,6 +1276,61 @@ def token_piece_features(piece: str) -> list[float]:
     ]
 
 
+def token_class_id(piece: str) -> int:
+    if piece == "" or "\ufffd" in piece:
+        return 0
+    if "\n" in piece:
+        return 1
+    if piece.isspace():
+        return 2
+    stripped = piece.strip()
+    if stripped and stripped.isdigit():
+        return 3
+    if stripped and stripped.isalpha():
+        return 4 if piece.startswith(" ") else 5
+    if stripped and stripped.isalnum():
+        return 6
+    if stripped and all(not ch.isalnum() and not ch.isspace() for ch in stripped):
+        return 7
+    return 8
+
+
+def build_target_token_classes(target_adapter) -> np.ndarray:
+    classes = np.zeros(target_adapter.spec.vocab_size, dtype=np.int16)
+    for token_id in range(target_adapter.spec.vocab_size):
+        classes[token_id] = token_class_id(target_adapter.decode([token_id]))
+    return classes
+
+
+def class_context_maps(ids: np.ndarray, focus: np.ndarray, classes_by_id: np.ndarray, num_classes: int) -> np.ndarray:
+    vocab_floor = int(max(int(ids.max(initial=0)), int(focus.max(initial=0)))) + 1
+    lookup = np.full(vocab_floor, -1, dtype=np.int32)
+    valid_focus = focus < vocab_floor
+    lookup[focus[valid_focus]] = np.arange(len(focus), dtype=np.int32)[valid_focus]
+    safe_classes = np.zeros(vocab_floor, dtype=np.int16)
+    upto = min(vocab_floor, len(classes_by_id))
+    safe_classes[:upto] = classes_by_id[:upto]
+
+    rows = lookup[ids[1:-1]]
+    left_cls = safe_classes[ids[:-2]]
+    right_cls = safe_classes[ids[2:]]
+    mask = rows >= 0
+    out = np.zeros((len(focus), num_classes * 2), dtype=np.float32)
+    if bool(mask.any()):
+        row_vals = rows[mask].astype(np.int64, copy=False)
+        left_flat = row_vals * num_classes + left_cls[mask].astype(np.int64, copy=False)
+        right_flat = row_vals * num_classes + right_cls[mask].astype(np.int64, copy=False)
+        out[:, :num_classes] = np.bincount(left_flat, minlength=len(focus) * num_classes).reshape(
+            len(focus), num_classes
+        )
+        out[:, num_classes:] = np.bincount(right_flat, minlength=len(focus) * num_classes).reshape(
+            len(focus), num_classes
+        )
+    norm = np.linalg.norm(out, axis=1, keepdims=True)
+    out /= np.maximum(norm, 1.0e-12)
+    return out
+
+
 def collect_oracle_rerank_groups(name: str, task, mapping: np.ndarray) -> list[dict]:
     c_counts = counts(task.cipher_ids, int(max(len(mapping), int(task.cipher_ids.max(initial=0)) + 1)))
     p_counts = counts(task.ref_ids, task.target_adapter.spec.vocab_size)
@@ -1451,7 +1536,8 @@ def oracle_reranker_diagnostic_main() -> None:
     for name, source, target in pairs:
         print(f"oracle_reranker_task={name} source={source} target={target}", flush=True)
         task = load_task(source, target, target_tokens=100_000, reference_tokens=REFERENCE_TOKENS, seed=SEED)
-        mapping = align_shuffled(task.cipher_ids, task.ref_ids, task.target_adapter.spec.vocab_size)
+        target_classes = build_target_token_classes(task.target_adapter) if CLASS_CONTEXT_RERANK else None
+        mapping = align_shuffled(task.cipher_ids, task.ref_ids, task.target_adapter.spec.vocab_size, target_classes)
         collected[name] = collect_oracle_rerank_groups(name, task, mapping)
 
     folds: dict[str, dict[str, float]] = {}
@@ -1691,6 +1777,7 @@ def collect_synthetic_rerank_groups(
 def synthetic_reranker_diagnostic_main() -> None:
     task = load_task("qwen3_6_27b", TARGET_TOKENIZER, target_tokens=100_000, reference_tokens=REFERENCE_TOKENS, seed=SEED)
     target_adapter = task.target_adapter
+    target_classes = build_target_token_classes(target_adapter) if CLASS_CONTEXT_RERANK else None
     collected: dict[str, list[dict]] = {}
     for idx, mode in enumerate(SYNTHETIC_RERANKER_TASKS):
         base_start = idx * (SYNTHETIC_RERANKER_TOKENS + 50_000)
@@ -1710,7 +1797,7 @@ def synthetic_reranker_diagnostic_main() -> None:
             f"types={len(oracle_by_cipher)} ref_tokens={len(ref_ids)}",
             flush=True,
         )
-        mapping = align_shuffled(cipher_ids, ref_ids, target_adapter.spec.vocab_size)
+        mapping = align_shuffled(cipher_ids, ref_ids, target_adapter.spec.vocab_size, target_classes)
         collected[mode] = collect_synthetic_rerank_groups(mode, cipher_ids, oracle_by_cipher, ref_ids, target_adapter, mapping)
 
     folds: dict[str, dict[str, float]] = {}
@@ -2414,7 +2501,8 @@ def main() -> None:
     print(f"cipher_tokens: {len(task.cipher_ids):,}")
     print(f"reference_tokens: {len(task.ref_ids):,}")
 
-    mapping = align_shuffled(task.cipher_ids, task.ref_ids, task.target_adapter.spec.vocab_size)
+    target_classes = build_target_token_classes(task.target_adapter) if CLASS_CONTEXT_RERANK else None
+    mapping = align_shuffled(task.cipher_ids, task.ref_ids, task.target_adapter.spec.vocab_size, target_classes)
     emissions = variable_emission_repair(task.cipher_ids, task.ref_ids, mapping, task.target_adapter.spec.vocab_size)
     string_overrides = string_lexicon_repair(
         task.cipher_ids,
