@@ -132,3 +132,4 @@ cfb3e24	core-1m-gemma	0.277212	0.309580	2.748144	6.3	keep	recomputed core-1m wit
 574c49d	core-100k-gemma	0.457860	0.469080	2.662821	6.3	discard	jackknife-gated external-owner repair reduced Mistral overfit but lost suite mean and max versus raw owner repair
 d767768	qwen36-o200k-100k-screen	0.000000	0.000000	0.000000	6.3	crash	wordish external-owner repair crashed before evaluation due mask passed to tail repair
 5fbec40	qwen-mistral-100k-screen	0.457670	0.462580	2.689231	6.3	diagnostic	wordish external-owner gate preserves Qwen gain and reduces Mistral overfit versus raw owner repair
+5fbec40	core-100k-gemma	0.457544	0.468560	2.662659	6.3	discard	wordish external-owner gate slightly improved mean but regressed Gemma max versus raw owner repair
