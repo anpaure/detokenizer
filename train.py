@@ -55,6 +55,14 @@ LEARN_WEIGHT_TEMP = 0.07
 DYNAMIC_ANCHOR_MAX_TOKENS = 100_000
 ENABLE_DYNAMIC_ASSIGNMENT_SWAPS = True
 ASSIGNMENT_SWAP_MIN_GAIN = 0.01
+LOCAL_LM_RERANK = True
+LOCAL_LM_CANDIDATES = 4
+LOCAL_LM_MAX_TARGET_TOKENS = 100_000
+LOCAL_LM_MAX_EDGE_GAP = 0.02
+LOCAL_LM_MIN_BPB_GAIN = 0.75
+LOCAL_LM_MAX_LEN_DELTA = 4
+
+LAST_CANDIDATES: dict[int, list[tuple[int, float]]] = {}
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -218,6 +226,8 @@ def topk_edges(
 
 
 def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_size: int) -> np.ndarray:
+    global LAST_CANDIDATES
+    LAST_CANDIDATES = {}
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device: {device}", flush=True)
     candidate_window = effective_candidate_window(len(cipher_ids))
@@ -311,6 +321,11 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
         if score_by_c is not None:
             for score, c, p in edges:
                 score_by_c.setdefault(c, {})[p] = score
+            if round_idx == rounds - 1:
+                LAST_CANDIDATES = {
+                    c: [(p, p_score) for p, p_score in scores.items()][:LOCAL_LM_CANDIDATES]
+                    for c, scores in score_by_c.items()
+                }
 
         for score, c, p in edges:
             if c in used_c or p in used_p:
@@ -371,6 +386,83 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
     return mapping
 
 
+def byte_lm_bpb_for(lm, history: bytes, data: bytes) -> float:
+    if not data:
+        return 99.0
+    ctx_buf = bytearray(history[-(lm.order - 1) :])
+    bits = 0.0
+    for nxt in data:
+        for n in range(lm.order - 1, -1, -1):
+            ctx = tuple(ctx_buf[-n:]) if n else ()
+            total = lm.context_counts[n].get(ctx, 0)
+            if total:
+                count = lm.next_counts[n].get(ctx, {}).get(nxt, 0)
+                bits -= np.log2((count + lm.alpha) / (total + lm.alpha * 256))
+                break
+        else:
+            bits += 8.0
+        ctx_buf.append(nxt)
+    return bits / len(data)
+
+
+def lm_reranked_decode(task, mapping: np.ndarray, sample_tokens: int) -> str | None:
+    if not LOCAL_LM_RERANK:
+        return None
+    if task.target_adapter.spec.family != "openai_tiktoken":
+        return None
+    if len(task.cipher_ids) > LOCAL_LM_MAX_TARGET_TOKENS:
+        return None
+    if not LAST_CANDIDATES:
+        return None
+
+    out = bytearray()
+    history = bytes([0]) * (task.byte_lm.order - 1)
+    changes = 0
+    considered = 0
+    for cipher_id in task.cipher_ids[:sample_tokens]:
+        c = int(cipher_id)
+        base = int(mapping[c])
+        candidates = LAST_CANDIDATES.get(c)
+        base_bytes = task.target_adapter.token_bytes(base)
+        if not candidates:
+            out.extend(base_bytes)
+            history = (history + base_bytes)[-(task.byte_lm.order - 1) :]
+            continue
+        base_score = None
+        for p, score in candidates:
+            if p == base:
+                base_score = score
+                break
+        if base_score is None:
+            out.extend(base_bytes)
+            history = (history + base_bytes)[-(task.byte_lm.order - 1) :]
+            continue
+
+        best = base
+        best_bytes = base_bytes
+        best_bpb = byte_lm_bpb_for(task.byte_lm, history, base_bytes)
+        for p, edge_score in candidates:
+            if p == base or base_score - edge_score > LOCAL_LM_MAX_EDGE_GAP:
+                continue
+            alt_bytes = task.target_adapter.token_bytes(p)
+            if abs(len(alt_bytes) - len(base_bytes)) > LOCAL_LM_MAX_LEN_DELTA:
+                continue
+            considered += 1
+            alt_bpb = byte_lm_bpb_for(task.byte_lm, history, alt_bytes)
+            if alt_bpb + LOCAL_LM_MIN_BPB_GAIN < best_bpb:
+                best = p
+                best_bytes = alt_bytes
+                best_bpb = alt_bpb
+        if best != base:
+            changes += 1
+        out.extend(best_bytes)
+        history = (history + best_bytes)[-(task.byte_lm.order - 1) :]
+
+    print(f"local_lm_rerank_considered={considered}", flush=True)
+    print(f"local_lm_rerank_changes={changes}", flush=True)
+    return bytes(out).decode("utf-8", errors="replace")
+
+
 def main() -> None:
     t0 = time.time()
     task = load_task(
@@ -386,8 +478,10 @@ def main() -> None:
     print(f"reference_tokens: {len(task.ref_ids):,}")
 
     mapping = align_shuffled(task.cipher_ids, task.ref_ids, task.target_adapter.spec.vocab_size)
-    mapped_sample = mapping[task.cipher_ids[:SAMPLE_TOKENS]]
-    recovered_sample = task.target_adapter.decode(mapped_sample.tolist())
+    recovered_sample = lm_reranked_decode(task, mapping, SAMPLE_TOKENS)
+    if recovered_sample is None:
+        mapped_sample = mapping[task.cipher_ids[:SAMPLE_TOKENS]]
+        recovered_sample = task.target_adapter.decode(mapped_sample.tolist())
     metrics = evaluate_recovery(task, recovered_sample, SAMPLE_TOKENS)
 
     out_dir = CACHE_DIR / "runs"
