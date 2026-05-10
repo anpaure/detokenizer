@@ -40,11 +40,19 @@ SEED = int(os.environ.get("DETOK_SEED", DEFAULT_SEED))
 TOP_TOKENS = 50_000
 ANCHORS = 8_192
 CANDIDATE_WINDOW = 10_000
-ROUNDS = 8
+ROUNDS = 6
 FREQ_WEIGHT = 0.12
 TORCH_TOPK = 64
 TORCH_BATCH_SIZE = 256
 TORCH_CONTEXT_CHUNK = 5_000_000
+
+
+def effective_candidate_window(num_cipher_tokens: int) -> int:
+    return 25_000 if num_cipher_tokens >= 1_000_000 else CANDIDATE_WINDOW
+
+
+def effective_rounds(num_cipher_tokens: int) -> int:
+    return 8 if num_cipher_tokens >= 1_000_000 else ROUNDS
 
 
 def counts(ids: np.ndarray, size: int) -> np.ndarray:
@@ -140,7 +148,8 @@ def topk_edges(
 def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_size: int) -> np.ndarray:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device: {device}", flush=True)
-    candidate_window = 25_000 if len(cipher_ids) >= 1_000_000 else CANDIDATE_WINDOW
+    candidate_window = effective_candidate_window(len(cipher_ids))
+    rounds = effective_rounds(len(cipher_ids))
     print(f"candidate_window: {candidate_window}", flush=True)
     c_counts = counts(cipher_ids, int(max(target_vocab_size, int(cipher_ids.max()) + 1)))
     p_counts = counts(ref_ids, target_vocab_size)
@@ -158,10 +167,10 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
     p_rank = np.empty(target_vocab_size, dtype=np.int64)
     p_rank[p_order_all] = np.arange(target_vocab_size)
 
-    for round_idx in range(ROUNDS):
+    for round_idx in range(rounds):
         c_anchors = c_focus[: min(ANCHORS, len(c_focus))]
         p_anchors = mapping[c_anchors]
-        print(f"round {round_idx + 1}/{ROUNDS}: focus={len(c_focus)} anchors={len(c_anchors)}", flush=True)
+        print(f"round {round_idx + 1}/{rounds}: focus={len(c_focus)} anchors={len(c_anchors)}", flush=True)
         with torch.no_grad():
             c_left, c_right = torch_context_maps(cipher_ids, c_focus, c_anchors, device)
             p_left, p_right = torch_context_maps(ref_ids, p_focus, p_anchors, device)
@@ -229,8 +238,8 @@ def main() -> None:
         "sample_tokens": SAMPLE_TOKENS,
         "top_tokens": TOP_TOKENS,
         "anchors": ANCHORS,
-        "candidate_window": CANDIDATE_WINDOW,
-        "rounds": ROUNDS,
+        "candidate_window": effective_candidate_window(len(task.cipher_ids)),
+        "rounds": effective_rounds(len(task.cipher_ids)),
         "freq_weight": FREQ_WEIGHT,
         "torch_topk": TORCH_TOPK,
         "elapsed_seconds": time.time() - t0,
@@ -249,7 +258,7 @@ def main() -> None:
     print(f"reference_tokens_M: {len(task.ref_ids) / 1e6:.3f}")
     print(f"top_tokens:       {TOP_TOKENS}")
     print(f"anchors:          {ANCHORS}")
-    print(f"rounds:           {ROUNDS}")
+    print(f"rounds:           {effective_rounds(len(task.cipher_ids))}")
 
 
 if __name__ == "__main__":
