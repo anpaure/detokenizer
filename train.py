@@ -85,6 +85,15 @@ EXTERNAL_OWNER_CONTEXTS = 8_192
 EXTERNAL_OWNER_CANDIDATES = 5
 EXTERNAL_OWNER_MIN_COUNT = 5
 EXTERNAL_OWNER_MIN_GAIN_PER_OCC = 0.35
+VARIABLE_EMISSION_REPAIR = True
+VARIABLE_EMISSION_MAX_TOKENS = 100_000
+VARIABLE_EMISSION_NODES = 512
+VARIABLE_EMISSION_CONTEXTS = 8_192
+VARIABLE_EMISSION_REF_POOL = 20_000
+VARIABLE_EMISSION_BIGRAM_CANDIDATES = 6
+VARIABLE_EMISSION_MIN_COUNT = 10
+VARIABLE_EMISSION_MIN_GAIN_PER_OCC = 0.20
+VARIABLE_EMISSION_MAX_ACCEPTED = 128
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -918,6 +927,197 @@ def error_breakdown(original: str, recovered: str, max_chars: int = 50_000) -> d
     return counts_by_class
 
 
+def variable_emission_repair(
+    cipher_ids: np.ndarray,
+    ref_ids: np.ndarray,
+    mapping: np.ndarray,
+    target_vocab_size: int,
+) -> dict[int, tuple[int, ...]]:
+    if not VARIABLE_EMISSION_REPAIR or len(cipher_ids) > VARIABLE_EMISSION_MAX_TOKENS:
+        return {}
+
+    c_counts = counts(cipher_ids, int(max(len(mapping), int(cipher_ids.max(initial=0)) + 1)))
+    p_counts = counts(ref_ids, target_vocab_size)
+    c_focus = np.argsort(-c_counts)[: min(TOP_TOKENS, np.count_nonzero(c_counts))].astype(np.int64)
+    p_order = np.argsort(-p_counts).astype(np.int64)
+    repair_nodes = [int(c) for c in c_focus[:VARIABLE_EMISSION_NODES] if c_counts[int(c)] >= VARIABLE_EMISSION_MIN_COUNT]
+    if len(repair_nodes) < 64:
+        return {}
+
+    context_c: list[int] = []
+    context_p: list[int] = []
+    seen_p: set[int] = set()
+    for c in c_focus[: max(VARIABLE_EMISSION_CONTEXTS * 2, VARIABLE_EMISSION_CONTEXTS)]:
+        c_int = int(c)
+        p_int = int(mapping[c_int])
+        if p_int < 0 or p_int >= target_vocab_size or p_int in seen_p:
+            continue
+        context_c.append(c_int)
+        context_p.append(p_int)
+        seen_p.add(p_int)
+        if len(context_c) >= VARIABLE_EMISSION_CONTEXTS:
+            break
+    if len(context_c) < 64:
+        return {}
+
+    seed_p: list[int] = []
+    seed_seen: set[int] = set()
+    for c in repair_nodes:
+        p_int = int(mapping[c])
+        if 0 <= p_int < target_vocab_size and p_int not in seed_seen:
+            seed_seen.add(p_int)
+            seed_p.append(p_int)
+    if len(seed_p) < 64:
+        return {}
+
+    pool = p_order[: min(VARIABLE_EMISSION_REF_POOL, len(p_order))]
+    seed_arr = np.asarray(seed_p, dtype=np.int64)
+    pool_arr = pool.astype(np.int64, copy=False)
+    succ = dense_cross_bigram_counts(ref_ids, seed_arr, pool_arr, target_vocab_size)
+    pred = dense_cross_bigram_counts(ref_ids, pool_arr, seed_arr, target_vocab_size).T
+    pool_by_idx = [int(p) for p in pool_arr]
+    seed_pos = {p: i for i, p in enumerate(seed_p)}
+
+    candidates_by_c: dict[int, list[tuple[int, int]]] = {}
+    candidate_token_seen: set[int] = set()
+    for c in repair_nodes:
+        p_int = int(mapping[c])
+        row = seed_pos.get(p_int)
+        if row is None:
+            continue
+        pairs: list[tuple[int, int]] = []
+        for counts_row, direction in ((succ[row], "right"), (pred[row], "left")):
+            positive = np.flatnonzero(counts_row > 0)
+            if positive.size == 0:
+                continue
+            take = min(VARIABLE_EMISSION_BIGRAM_CANDIDATES, int(positive.size))
+            if positive.size > take:
+                best_idx = positive[np.argpartition(counts_row[positive], -take)[-take:]]
+            else:
+                best_idx = positive
+            best_idx = best_idx[np.argsort(-counts_row[best_idx])]
+            for idx in best_idx:
+                q_int = pool_by_idx[int(idx)]
+                if q_int == p_int:
+                    continue
+                pair = (p_int, q_int) if direction == "right" else (q_int, p_int)
+                if pair not in pairs:
+                    pairs.append(pair)
+                candidate_token_seen.update(pair)
+        if pairs:
+            candidates_by_c[c] = pairs
+            candidate_token_seen.add(p_int)
+
+    if not candidates_by_c or len(candidate_token_seen) < 64:
+        return {}
+
+    repair_arr = np.asarray(list(candidates_by_c.keys()), dtype=np.int64)
+    context_c_arr = np.asarray(context_c, dtype=np.int64)
+    context_p_arr = np.asarray(context_p, dtype=np.int64)
+    candidate_arr = np.asarray(sorted(candidate_token_seen), dtype=np.int64)
+    candidate_pos = {int(p): i for i, p in enumerate(candidate_arr)}
+    context_pos = {int(p): i for i, p in enumerate(context_p_arr)}
+
+    c_right = dense_cross_bigram_counts(cipher_ids, repair_arr, context_c_arr, len(mapping))
+    c_left = dense_cross_bigram_counts(cipher_ids, context_c_arr, repair_arr, len(mapping)).T
+    p_context_to_candidate = dense_cross_bigram_counts(ref_ids, context_p_arr, candidate_arr, target_vocab_size)
+    p_candidate_to_context = dense_cross_bigram_counts(ref_ids, candidate_arr, context_p_arr, target_vocab_size)
+
+    total_ref = float(max(1, int(p_counts.sum())))
+    alpha = BIGRAM_REFINE_ALPHA
+    candidate_unigram = (p_counts[candidate_arr].astype(np.float32) + alpha) / (
+        total_ref + alpha * target_vocab_size
+    )
+    context_unigram = (p_counts[context_p_arr].astype(np.float32) + alpha) / (
+        total_ref + alpha * target_vocab_size
+    )
+    context_den = p_counts[context_p_arr].astype(np.float32)[:, None] + alpha
+    candidate_den = p_counts[candidate_arr].astype(np.float32)[:, None] + alpha
+    log_context_to_candidate = np.log(
+        (p_context_to_candidate + alpha * candidate_unigram[None, :]) / context_den
+    ).astype(np.float32)
+    log_candidate_to_context = np.log(
+        (p_candidate_to_context + alpha * context_unigram[None, :]) / candidate_den
+    ).astype(np.float32)
+
+    pool_pos = {int(p): i for i, p in enumerate(pool_arr)}
+
+    def internal_log(first: int, second: int) -> float:
+        row = seed_pos.get(first)
+        col = pool_pos.get(second)
+        if row is not None and col is not None:
+            cnt = float(succ[row, col])
+        else:
+            row2 = seed_pos.get(second)
+            col2 = pool_pos.get(first)
+            cnt = float(pred[row2, col2]) if row2 is not None and col2 is not None else 0.0
+        uni = (float(p_counts[second]) + alpha) / (total_ref + alpha * target_vocab_size)
+        return float(np.log((cnt + alpha * uni) / (float(p_counts[first]) + alpha)))
+
+    emissions: dict[int, tuple[int, ...]] = {}
+    proposals: list[tuple[float, int, tuple[int, int], float]] = []
+    for row, c in enumerate(repair_arr):
+        c_int = int(c)
+        current = int(mapping[c_int])
+        current_idx = candidate_pos.get(current)
+        if current_idx is None:
+            continue
+        current_score = float(c_left[row] @ log_context_to_candidate[:, current_idx])
+        current_score += float(c_right[row] @ log_candidate_to_context[current_idx, :])
+        occ = max(1.0, float(c_counts[c_int]))
+        best_pair: tuple[int, int] | None = None
+        best_score = current_score
+        for first, second in candidates_by_c.get(c_int, []):
+            first_idx = candidate_pos.get(first)
+            second_idx = candidate_pos.get(second)
+            if first_idx is None or second_idx is None:
+                continue
+            score = float(c_left[row] @ log_context_to_candidate[:, first_idx])
+            score += occ * internal_log(first, second)
+            score += float(c_right[row] @ log_candidate_to_context[second_idx, :])
+            if score > best_score:
+                best_score = score
+                best_pair = (first, second)
+        if best_pair is None:
+            continue
+        gain_per_occ = (best_score - current_score) / occ
+        if gain_per_occ >= VARIABLE_EMISSION_MIN_GAIN_PER_OCC:
+            proposals.append((gain_per_occ, c_int, best_pair, occ))
+
+    proposals.sort(reverse=True)
+    for gain, c, pair, _ in proposals[:VARIABLE_EMISSION_MAX_ACCEPTED]:
+        emissions[c] = pair
+    print(
+        f"variable_emission_nodes={len(repair_arr)} candidates={sum(len(v) for v in candidates_by_c.values())} "
+        f"proposals={len(proposals)} accepted={len(emissions)}",
+        flush=True,
+    )
+    if proposals:
+        gains = np.asarray([p[0] for p in proposals], dtype=np.float32)
+        print(f"variable_emission_gain_per_occ_median={float(np.median(gains)):.6f}", flush=True)
+        print(f"variable_emission_gain_per_occ_p90={float(np.percentile(gains, 90)):.6f}", flush=True)
+    return emissions
+
+
+def decode_with_variable_emissions(
+    cipher_ids: np.ndarray,
+    mapping: np.ndarray,
+    emissions: dict[int, tuple[int, ...]],
+    target_adapter,
+) -> str:
+    if not emissions:
+        return target_adapter.decode(mapping[cipher_ids].astype(int).tolist())
+    out: list[int] = []
+    for c in cipher_ids:
+        c_int = int(c)
+        emission = emissions.get(c_int)
+        if emission is None:
+            out.append(int(mapping[c_int]))
+        else:
+            out.extend(int(p) for p in emission)
+    return target_adapter.decode(out)
+
+
 def main() -> None:
     t0 = time.time()
     task = load_task(
@@ -933,8 +1133,13 @@ def main() -> None:
     print(f"reference_tokens: {len(task.ref_ids):,}")
 
     mapping = align_shuffled(task.cipher_ids, task.ref_ids, task.target_adapter.spec.vocab_size)
-    mapped_sample = mapping[task.cipher_ids[:SAMPLE_TOKENS]]
-    recovered_sample = task.target_adapter.decode(mapped_sample.tolist())
+    emissions = variable_emission_repair(task.cipher_ids, task.ref_ids, mapping, task.target_adapter.spec.vocab_size)
+    recovered_sample = decode_with_variable_emissions(
+        task.cipher_ids[:SAMPLE_TOKENS],
+        mapping,
+        emissions,
+        task.target_adapter,
+    )
     metrics = evaluate_recovery(task, recovered_sample, SAMPLE_TOKENS)
     diagnostics: dict[str, int] = {}
     if ENABLE_DIAGNOSTICS:
@@ -963,6 +1168,8 @@ def main() -> None:
         "bigram_refine_all_scales": BIGRAM_REFINE_ALL_SCALES,
         "skip_context_weight": SKIP_CONTEXT_WEIGHT,
         "learn_skip_weight": LEARN_SKIP_WEIGHT,
+        "variable_emission_repair": VARIABLE_EMISSION_REPAIR,
+        "variable_emissions": len(emissions),
         "diagnostics": diagnostics,
         "elapsed_seconds": time.time() - t0,
         "metrics": metrics,
