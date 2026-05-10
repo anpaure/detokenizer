@@ -102,3 +102,4 @@ fe9e07d	core-1m	0.270004	0.288520	2.729153	6.3	discard	quarter-weight skip bigra
 0052f5c	core-1m	0.267432	0.282240	2.730158	6.3	keep	0.4 skip-bigram weight improves 1m mean and max versus accepted half-weight setting
 bc026aa	qwen36-o200k-1m-screen	0.280800	0.280800	2.763993	6.3	discard	fixed-context bigram swap objective worsened hard 1m screen
 bc026aa	core-100k	0.472880	0.482900	2.665038	6.3	discard	fixed-context bigram swap objective worsened low-data suite despite broader neighbor evidence
+df95811	core-100k	0.472496	0.480200	2.677089	6.3	discard	repair-closure node selection overfit proposed swaps and worsened low-data suite
