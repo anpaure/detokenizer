@@ -116,3 +116,4 @@ cff784e	qwen36-o200k-100k-screen	0.489720	0.489720	2.762881	6.3	discard	first-or
 a08609d	core-100k	0.453876	0.461900	2.654633	6.3	keep	fixed-neighbor tail unary repair improves low-data mean and max after gated unigram backoff
 97a1814	qwen36-qwen36-100k-diagnostic	0.458060	0.458060	2.613550	6.3	diagnostic	source-retokenized reference did not improve low-data screen, pointing to assignment noise at 100k
 97a1814	qwen36-qwen36-1m-diagnostic	0.242780	0.242780	2.683163	6.3	diagnostic	source-retokenized reference sharply improved 1m, exposing cross-tokenizer one-token emission bottleneck
+cfb1015	qwen36-o200k-1m-screen	0.283940	0.283940	2.773606	6.3	discard	conservative length-2 target emissions accepted 6 expansions but worsened hard 1m screen
