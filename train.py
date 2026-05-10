@@ -78,6 +78,13 @@ TAIL_REPAIR_NODES = 1_024
 TAIL_REPAIR_CONTEXTS = 8_192
 TAIL_REPAIR_CANDIDATES = 8
 TAIL_REPAIR_MIN_GAIN_PER_OCC = 0.15
+EXTERNAL_OWNER_REPAIR = True
+EXTERNAL_OWNER_MAX_TOKENS = 100_000
+EXTERNAL_OWNER_NODES = 2_048
+EXTERNAL_OWNER_CONTEXTS = 8_192
+EXTERNAL_OWNER_CANDIDATES = 5
+EXTERNAL_OWNER_MIN_COUNT = 5
+EXTERNAL_OWNER_MIN_GAIN_PER_OCC = 0.35
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -539,6 +546,159 @@ def tail_unary_repair(
     return repaired
 
 
+def external_owner_repair(
+    cipher_ids: np.ndarray,
+    ref_ids: np.ndarray,
+    mapping: np.ndarray,
+    c_counts: np.ndarray,
+    c_focus: np.ndarray,
+    edges: list[tuple[float, int, int]],
+    target_vocab_size: int,
+) -> np.ndarray:
+    if not EXTERNAL_OWNER_REPAIR or len(cipher_ids) > EXTERNAL_OWNER_MAX_TOKENS:
+        return mapping
+    c_nodes = c_focus[: min(len(c_focus), EXTERNAL_OWNER_NODES)]
+    if len(c_nodes) < 64:
+        return mapping
+
+    p_nodes = set(map(int, mapping[c_nodes]))
+    owner_of_p: dict[int, int] = {}
+    for c in c_focus:
+        c_int = int(c)
+        p_int = int(mapping[c_int])
+        if p_int < 0 or p_int >= target_vocab_size or p_int in owner_of_p:
+            continue
+        owner_of_p[p_int] = c_int
+
+    c_node_set = set(map(int, c_nodes))
+    candidates: list[tuple[int, int, int]] = []
+    candidates_seen: set[tuple[int, int]] = set()
+    per_c_counts: dict[int, int] = {}
+    for _, c, p in edges:
+        if c not in c_node_set or p in p_nodes:
+            continue
+        if c_counts[int(c)] < EXTERNAL_OWNER_MIN_COUNT:
+            continue
+        owner = owner_of_p.get(int(p))
+        if owner is None or owner == c or c_counts[owner] < EXTERNAL_OWNER_MIN_COUNT:
+            continue
+        used = per_c_counts.get(int(c), 0)
+        if used >= EXTERNAL_OWNER_CANDIDATES:
+            continue
+        key = (int(c), int(p))
+        if key in candidates_seen:
+            continue
+        candidates_seen.add(key)
+        per_c_counts[int(c)] = used + 1
+        candidates.append((int(c), int(p), int(owner)))
+    if not candidates:
+        return mapping
+
+    context_c: list[int] = []
+    context_p: list[int] = []
+    seen_p: set[int] = set()
+    for c in c_focus[: max(EXTERNAL_OWNER_CONTEXTS * 2, EXTERNAL_OWNER_CONTEXTS)]:
+        c_int = int(c)
+        p_int = int(mapping[c_int])
+        if p_int < 0 or p_int >= target_vocab_size or p_int in seen_p:
+            continue
+        context_c.append(c_int)
+        context_p.append(p_int)
+        seen_p.add(p_int)
+        if len(context_c) >= EXTERNAL_OWNER_CONTEXTS:
+            break
+    if len(context_c) < 64:
+        return mapping
+
+    repair_nodes: list[int] = []
+    repair_seen: set[int] = set()
+    candidate_p: list[int] = []
+    candidate_p_seen: set[int] = set()
+    for c, p, owner in candidates:
+        for node in (c, owner):
+            if node not in repair_seen:
+                repair_seen.add(node)
+                repair_nodes.append(node)
+        for p_int in (int(mapping[c]), int(mapping[owner]), p):
+            if 0 <= p_int < target_vocab_size and p_int not in candidate_p_seen:
+                candidate_p_seen.add(p_int)
+                candidate_p.append(p_int)
+    if len(repair_nodes) < 64 or len(candidate_p) < 64:
+        return mapping
+
+    repair_arr = np.asarray(repair_nodes, dtype=np.int64)
+    context_c_arr = np.asarray(context_c, dtype=np.int64)
+    context_p_arr = np.asarray(context_p, dtype=np.int64)
+    candidate_p_arr = np.asarray(candidate_p, dtype=np.int64)
+    c_right = dense_cross_bigram_counts(cipher_ids, repair_arr, context_c_arr, len(mapping))
+    c_left = dense_cross_bigram_counts(cipher_ids, context_c_arr, repair_arr, len(mapping)).T
+    p_right = dense_cross_bigram_counts(ref_ids, candidate_p_arr, context_p_arr, target_vocab_size)
+    p_left = dense_cross_bigram_counts(ref_ids, context_p_arr, candidate_p_arr, target_vocab_size)
+    p_right_log = np.log(
+        (p_right + BIGRAM_REFINE_ALPHA)
+        / (p_right.sum(axis=1, keepdims=True) + BIGRAM_REFINE_ALPHA * len(context_p_arr))
+    ).astype(np.float32)
+    p_left_log = np.log(
+        (p_left + BIGRAM_REFINE_ALPHA)
+        / (p_left.sum(axis=1, keepdims=True) + BIGRAM_REFINE_ALPHA * len(candidate_p_arr))
+    ).astype(np.float32)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    with torch.no_grad():
+        scores = torch.as_tensor(c_right, dtype=torch.float32, device=device) @ torch.as_tensor(
+            p_right_log, dtype=torch.float32, device=device
+        ).T
+        scores.add_(
+            torch.as_tensor(c_left, dtype=torch.float32, device=device)
+            @ torch.as_tensor(p_left_log, dtype=torch.float32, device=device)
+        )
+        score_np = scores.cpu().numpy()
+
+    node_pos = {int(c): i for i, c in enumerate(repair_nodes)}
+    p_pos = {int(p): i for i, p in enumerate(candidate_p)}
+    proposals: list[tuple[float, int, int, int, int]] = []
+    for c, p, owner in candidates:
+        old_c = int(mapping[c])
+        old_owner = int(mapping[owner])
+        if old_owner != p:
+            continue
+        ci = node_pos.get(c)
+        oi = node_pos.get(owner)
+        pi = p_pos.get(p)
+        old_ci = p_pos.get(old_c)
+        if ci is None or oi is None or pi is None or old_ci is None:
+            continue
+        old_score = float(score_np[ci, old_ci] + score_np[oi, pi])
+        new_score = float(score_np[ci, pi] + score_np[oi, old_ci])
+        occ = max(1.0, float(c_counts[c] + c_counts[owner]))
+        gain_per_occ = (new_score - old_score) / occ
+        if gain_per_occ < EXTERNAL_OWNER_MIN_GAIN_PER_OCC:
+            continue
+        proposals.append((gain_per_occ, c, p, owner, old_c))
+
+    proposals.sort(reverse=True)
+    repaired = mapping.copy()
+    used_nodes: set[int] = set()
+    used_targets: set[int] = set()
+    accepted = 0
+    for gain, c, p, owner, old_c in proposals:
+        if c in used_nodes or owner in used_nodes or p in used_targets or old_c in used_targets:
+            continue
+        if int(repaired[c]) != old_c or int(repaired[owner]) != p:
+            continue
+        repaired[c] = p
+        repaired[owner] = old_c
+        used_nodes.update((c, owner))
+        used_targets.update((p, old_c))
+        accepted += 1
+    print(f"external_owner_candidates={len(candidates)} proposals={len(proposals)} accepted={accepted}", flush=True)
+    if proposals:
+        gains = np.asarray([p[0] for p in proposals], dtype=np.float32)
+        print(f"external_owner_gain_per_occ_median={float(np.median(gains)):.6f}", flush=True)
+        print(f"external_owner_gain_per_occ_p90={float(np.percentile(gains, 90)):.6f}", flush=True)
+    return repaired
+
+
 def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_size: int) -> np.ndarray:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device: {device}", flush=True)
@@ -690,6 +850,15 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
                 mapping,
                 c_counts,
                 p_counts,
+                c_focus,
+                edges,
+                target_vocab_size,
+            )
+            mapping = external_owner_repair(
+                cipher_ids,
+                ref_ids,
+                mapping,
+                c_counts,
                 c_focus,
                 edges,
                 target_vocab_size,
