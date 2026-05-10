@@ -53,7 +53,6 @@ LEARN_WEIGHT_STEPS = 12
 LEARN_WEIGHT_LR = 0.2
 LEARN_WEIGHT_TEMP = 0.07
 DYNAMIC_ANCHOR_MAX_TOKENS = 100_000
-ANCHOR_MARGIN_WEIGHT = 0.5
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -301,19 +300,6 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
                 torch.cuda.empty_cache()
 
         edges.sort(reverse=True)
-        best_scores: dict[int, float] = {}
-        second_scores: dict[int, float] = {}
-        if use_dynamic_anchors:
-            for score, c, _ in edges:
-                best = best_scores.get(c)
-                if best is None:
-                    best_scores[c] = score
-                    second_scores[c] = -1.0e9
-                elif score > best:
-                    second_scores[c] = best
-                    best_scores[c] = score
-                elif score > second_scores[c]:
-                    second_scores[c] = score
         used_c: set[int] = set()
         used_p: set[int] = set()
         assigned_scores: list[tuple[float, int]] = []
@@ -324,11 +310,7 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
             next_mapping[c] = p
             used_c.add(c)
             used_p.add(p)
-            anchor_score = score
-            if use_dynamic_anchors:
-                margin = max(0.0, best_scores.get(c, score) - second_scores.get(c, score))
-                anchor_score = score + ANCHOR_MARGIN_WEIGHT * margin
-            assigned_scores.append((anchor_score, c))
+            assigned_scores.append((score, c))
         mapping = next_mapping
         if use_dynamic_anchors and len(assigned_scores) >= 64:
             assigned_scores.sort(reverse=True)
