@@ -45,6 +45,8 @@ FREQ_WEIGHT = 0.12
 TORCH_TOPK = 64
 TORCH_BATCH_SIZE = 256
 TORCH_CONTEXT_CHUNK = 5_000_000
+SKIP_CONTEXT_MIN_TOKENS = 1_000_000
+SKIP_CONTEXT_WEIGHT = 0.5
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -59,7 +61,7 @@ def counts(ids: np.ndarray, size: int) -> np.ndarray:
     return np.bincount(ids.astype(np.int64, copy=False), minlength=size)
 
 
-def torch_context_maps(ids: np.ndarray, focus: np.ndarray, anchors: np.ndarray, device: str):
+def torch_context_maps(ids: np.ndarray, focus: np.ndarray, anchors: np.ndarray, device: str, offset: int = 1):
     vocab_floor = int(max(int(ids.max(initial=0)), int(focus.max(initial=0)), int(anchors.max(initial=0)))) + 1
     focus_lookup = torch.full((vocab_floor,), -1, dtype=torch.int32, device=device)
     anchor_lookup = torch.full((vocab_floor,), -1, dtype=torch.int32, device=device)
@@ -72,10 +74,14 @@ def torch_context_maps(ids: np.ndarray, focus: np.ndarray, anchors: np.ndarray, 
     left_flat = torch.zeros(len(focus) * len(anchors), dtype=torch.float32, device=device)
     right_flat = torch.zeros_like(left_flat)
     base = len(anchors)
-    for start in range(0, max(0, len(ids) - 1), TORCH_CONTEXT_CHUNK):
-        stop = min(len(ids) - 1, start + TORCH_CONTEXT_CHUNK)
+    for start in range(0, max(0, len(ids) - offset), TORCH_CONTEXT_CHUNK):
+        stop = min(len(ids) - offset, start + TORCH_CONTEXT_CHUNK)
         prev = torch.as_tensor(ids[start:stop].astype(np.int64, copy=False), dtype=torch.long, device=device)
-        nxt = torch.as_tensor(ids[start + 1 : stop + 1].astype(np.int64, copy=False), dtype=torch.long, device=device)
+        nxt = torch.as_tensor(
+            ids[start + offset : stop + offset].astype(np.int64, copy=False),
+            dtype=torch.long,
+            device=device,
+        )
         prev_ok = prev < vocab_floor
         nxt_ok = nxt < vocab_floor
 
@@ -103,9 +109,10 @@ def torch_context_maps(ids: np.ndarray, focus: np.ndarray, anchors: np.ndarray, 
 
 def normalize_features(x, token_counts: np.ndarray, device: str):
     counts_t = torch.as_tensor(np.maximum(1.0, token_counts.astype(np.float32)), dtype=torch.float32, device=device)
-    y = x / torch.sqrt(counts_t)[:, None]
-    norm = torch.linalg.vector_norm(y, dim=1).clamp_min(1e-12)
-    return y / norm[:, None]
+    x.div_(torch.sqrt(counts_t)[:, None])
+    norm = torch.linalg.vector_norm(x, dim=1).clamp_min(1e-12)
+    x.div_(norm[:, None])
+    return x
 
 
 def topk_edges(
@@ -150,7 +157,9 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
     print(f"device: {device}", flush=True)
     candidate_window = effective_candidate_window(len(cipher_ids))
     rounds = effective_rounds(len(cipher_ids))
+    use_skip_context = len(cipher_ids) >= SKIP_CONTEXT_MIN_TOKENS
     print(f"candidate_window: {candidate_window}", flush=True)
+    print(f"skip_context: {use_skip_context}", flush=True)
     c_counts = counts(cipher_ids, int(max(target_vocab_size, int(cipher_ids.max()) + 1)))
     p_counts = counts(ref_ids, target_vocab_size)
     c_order_all = np.argsort(-c_counts)
@@ -174,9 +183,22 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
         with torch.no_grad():
             c_left, c_right = torch_context_maps(cipher_ids, c_focus, c_anchors, device)
             p_left, p_right = torch_context_maps(ref_ids, p_focus, p_anchors, device)
-            c_vec = normalize_features(torch.cat([c_left, c_right], dim=1), c_counts[c_focus], device)
-            p_vec = normalize_features(torch.cat([p_left, p_right], dim=1), p_counts[p_focus], device)
-            del c_left, c_right, p_left, p_right
+            c_parts = [c_left, c_right]
+            p_parts = [p_left, p_right]
+            if use_skip_context:
+                c_left2, c_right2 = torch_context_maps(cipher_ids, c_focus, c_anchors, device, offset=2)
+                p_left2, p_right2 = torch_context_maps(ref_ids, p_focus, p_anchors, device, offset=2)
+                c_left2.mul_(SKIP_CONTEXT_WEIGHT)
+                c_right2.mul_(SKIP_CONTEXT_WEIGHT)
+                p_left2.mul_(SKIP_CONTEXT_WEIGHT)
+                p_right2.mul_(SKIP_CONTEXT_WEIGHT)
+                c_parts.extend([c_left2, c_right2])
+                p_parts.extend([p_left2, p_right2])
+            c_vec = normalize_features(torch.cat(c_parts, dim=1), c_counts[c_focus], device)
+            p_vec = normalize_features(torch.cat(p_parts, dim=1), p_counts[p_focus], device)
+            del c_parts, p_parts, c_left, c_right, p_left, p_right
+            if use_skip_context:
+                del c_left2, c_right2, p_left2, p_right2
             edges = topk_edges(
                 c_vec,
                 p_vec,
@@ -242,6 +264,8 @@ def main() -> None:
         "rounds": effective_rounds(len(task.cipher_ids)),
         "freq_weight": FREQ_WEIGHT,
         "torch_topk": TORCH_TOPK,
+        "skip_context": len(task.cipher_ids) >= SKIP_CONTEXT_MIN_TOKENS,
+        "skip_context_weight": SKIP_CONTEXT_WEIGHT,
         "elapsed_seconds": time.time() - t0,
         "metrics": metrics,
         "preview": recovered_sample[:1000],
