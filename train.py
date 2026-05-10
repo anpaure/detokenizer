@@ -62,6 +62,7 @@ BIGRAM_REFINE_LARGE_TOKENS = 8_192
 BIGRAM_REFINE_LARGE_TOKEN_MIN_TOKENS = 1_000_000
 BIGRAM_REFINE_LARGE_TOKEN_MAX_TOKENS = 1_000_000
 BIGRAM_REFINE_MAX_PROPOSALS = 100_000
+BIGRAM_REFINE_LARGE_MAX_PROPOSALS = 200_000
 BIGRAM_REFINE_PASSES = 4
 BIGRAM_REFINE_ALPHA = 0.05
 
@@ -308,6 +309,11 @@ def refine_with_bigram_objective(
 
     proposals: list[tuple[int, int]] = []
     seen_proposals: set[tuple[int, int]] = set()
+    proposal_budget = (
+        BIGRAM_REFINE_LARGE_MAX_PROPOSALS
+        if BIGRAM_REFINE_LARGE_TOKEN_MIN_TOKENS <= len(cipher_ids) <= BIGRAM_REFINE_LARGE_TOKEN_MAX_TOKENS
+        else BIGRAM_REFINE_MAX_PROPOSALS
+    )
     for _, c, p in edges:
         i = c_to_i.get(c)
         p_idx = p_to_i.get(p)
@@ -318,7 +324,7 @@ def refine_with_bigram_objective(
             continue
         seen_proposals.add(key)
         proposals.append(key)
-        if len(proposals) >= BIGRAM_REFINE_MAX_PROPOSALS:
+        if len(proposals) >= proposal_budget:
             break
 
     swaps = 0
@@ -347,6 +353,7 @@ def refine_with_bigram_objective(
         refined[c_nodes] = p_nodes[perm]
         mapping = refined
     print(f"bigram_refine_proposals={len(proposals)}", flush=True)
+    print(f"bigram_refine_proposal_budget={proposal_budget}", flush=True)
     print(f"bigram_refine_passes={passes_run}", flush=True)
     print(f"bigram_refine_swaps={swaps}", flush=True)
     return mapping
