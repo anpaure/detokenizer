@@ -111,6 +111,14 @@ the decoded text becomes more fluent but less correct.
 
 ![Improvement over time](plots/improvement_over_time.svg)
 
+Current accepted bests:
+
+| Suite | Mean CER50k |
+|---|---:|
+| `core-100k` | `0.453876` |
+| `core-1m` | `0.267432` |
+| `core-10m-3pair` | `0.103947` |
+
 The complete experiment ledger is tracked in `results.tsv`. It includes accepted
 keeps, discarded regressions, diagnostics, refinement notes, and pivots.
 
