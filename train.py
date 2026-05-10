@@ -70,6 +70,7 @@ BIGRAM_REFINE_SKIP_MAX_TOKENS = 1_000_000
 BIGRAM_REFINE_ALPHA = 0.05
 BIGRAM_UNIGRAM_BACKOFF = True
 BIGRAM_UNIGRAM_BACKOFF_TAU = 1000.0
+BIGRAM_UNIGRAM_BACKOFF_MAX_TOKENS = 100_000
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -313,7 +314,7 @@ def refine_with_bigram_objective(
         p_big += BIGRAM_REFINE_SKIP_WEIGHT * dense_bigram_counts(ref_ids, p_nodes, target_vocab_size, offset=2)
     row_totals = p_big.sum(axis=1, keepdims=True)
     block_probs = (p_big + BIGRAM_REFINE_ALPHA) / (row_totals + BIGRAM_REFINE_ALPHA * k)
-    if BIGRAM_UNIGRAM_BACKOFF:
+    if BIGRAM_UNIGRAM_BACKOFF and len(cipher_ids) <= BIGRAM_UNIGRAM_BACKOFF_MAX_TOKENS:
         unigram = p_counts[p_nodes].astype(np.float32)
         unigram = (unigram + BIGRAM_REFINE_ALPHA) / (float(unigram.sum()) + BIGRAM_REFINE_ALPHA * k)
         lam = row_totals / (row_totals + BIGRAM_UNIGRAM_BACKOFF_TAU)
