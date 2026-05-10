@@ -85,6 +85,7 @@ EXTERNAL_OWNER_CONTEXTS = 8_192
 EXTERNAL_OWNER_CANDIDATES = 5
 EXTERNAL_OWNER_MIN_COUNT = 5
 EXTERNAL_OWNER_MIN_GAIN_PER_OCC = 0.35
+EXTERNAL_OWNER_WORDISH_ONLY = True
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -554,6 +555,7 @@ def external_owner_repair(
     c_focus: np.ndarray,
     edges: list[tuple[float, int, int]],
     target_vocab_size: int,
+    target_wordish: np.ndarray | None = None,
 ) -> np.ndarray:
     if not EXTERNAL_OWNER_REPAIR or len(cipher_ids) > EXTERNAL_OWNER_MAX_TOKENS:
         return mapping
@@ -657,11 +659,21 @@ def external_owner_repair(
     node_pos = {int(c): i for i, c in enumerate(repair_nodes)}
     p_pos = {int(p): i for i, p in enumerate(candidate_p)}
     proposals: list[tuple[float, int, int, int, int]] = []
+    class_rejected = 0
     for c, p, owner in candidates:
         old_c = int(mapping[c])
         old_owner = int(mapping[owner])
         if old_owner != p:
             continue
+        if EXTERNAL_OWNER_WORDISH_ONLY and target_wordish is not None:
+            if (
+                p >= len(target_wordish)
+                or old_c >= len(target_wordish)
+                or not bool(target_wordish[p])
+                or not bool(target_wordish[old_c])
+            ):
+                class_rejected += 1
+                continue
         ci = node_pos.get(c)
         oi = node_pos.get(owner)
         pi = p_pos.get(p)
@@ -692,6 +704,7 @@ def external_owner_repair(
         used_targets.update((p, old_c))
         accepted += 1
     print(f"external_owner_candidates={len(candidates)} proposals={len(proposals)} accepted={accepted}", flush=True)
+    print(f"external_owner_wordish_only={EXTERNAL_OWNER_WORDISH_ONLY} class_rejected={class_rejected}", flush=True)
     if proposals:
         gains = np.asarray([p[0] for p in proposals], dtype=np.float32)
         print(f"external_owner_gain_per_occ_median={float(np.median(gains)):.6f}", flush=True)
@@ -699,7 +712,12 @@ def external_owner_repair(
     return repaired
 
 
-def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_size: int) -> np.ndarray:
+def align_shuffled(
+    cipher_ids: np.ndarray,
+    ref_ids: np.ndarray,
+    target_vocab_size: int,
+    target_wordish: np.ndarray | None = None,
+) -> np.ndarray:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device: {device}", flush=True)
     candidate_window = effective_candidate_window(len(cipher_ids))
@@ -853,6 +871,7 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
                 c_focus,
                 edges,
                 target_vocab_size,
+                target_wordish,
             )
             mapping = external_owner_repair(
                 cipher_ids,
@@ -914,6 +933,24 @@ def error_breakdown(original: str, recovered: str, max_chars: int = 50_000) -> d
     return counts_by_class
 
 
+def build_wordish_mask(adapter, vocab_size: int) -> np.ndarray:
+    mask = np.zeros(vocab_size, dtype=bool)
+    for token_id in range(vocab_size):
+        try:
+            text = adapter.token_bytes(token_id).decode("utf-8", errors="ignore")
+        except Exception:
+            continue
+        stripped = text.strip()
+        if not stripped:
+            continue
+        alnum = sum(ch.isalnum() for ch in stripped)
+        marker = sum(ch in "▁ĠĊ" for ch in stripped)
+        punctuation = sum((not ch.isalnum()) and (not ch.isspace()) and ch not in "▁ĠĊ" for ch in stripped)
+        mask[token_id] = alnum > 0 and punctuation <= max(1, marker)
+    print(f"wordish_tokens={int(mask.sum())}/{vocab_size}", flush=True)
+    return mask
+
+
 def main() -> None:
     t0 = time.time()
     task = load_task(
@@ -928,7 +965,8 @@ def main() -> None:
     print(f"cipher_tokens: {len(task.cipher_ids):,}")
     print(f"reference_tokens: {len(task.ref_ids):,}")
 
-    mapping = align_shuffled(task.cipher_ids, task.ref_ids, task.target_adapter.spec.vocab_size)
+    target_wordish = build_wordish_mask(task.target_adapter, task.target_adapter.spec.vocab_size)
+    mapping = align_shuffled(task.cipher_ids, task.ref_ids, task.target_adapter.spec.vocab_size, target_wordish)
     mapped_sample = mapping[task.cipher_ids[:SAMPLE_TOKENS]]
     recovered_sample = task.target_adapter.decode(mapped_sample.tolist())
     metrics = evaluate_recovery(task, recovered_sample, SAMPLE_TOKENS)
