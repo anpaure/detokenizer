@@ -46,7 +46,7 @@ TORCH_TOPK = 64
 TORCH_BATCH_SIZE = 256
 TORCH_CONTEXT_CHUNK = 5_000_000
 SKIP_CONTEXT_MIN_TOKENS = 1_000_000
-SKIP_CONTEXT_WEIGHT = 0.5
+SKIP_CONTEXT_WEIGHT = 1.0
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
