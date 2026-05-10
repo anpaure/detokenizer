@@ -153,3 +153,4 @@ dfd85ab	qwen36-o200k-100k-screen	0.451680	0.451680	2.693335	6.3	discard	high-mar
 b46ca65	core-100k-gemma	0.456364	0.464420	2.649479	6.3	keep	two free local-pair variable emissions preserve CER gain and improve BPB versus single emission
 c122aa2	qwen-mistral-gemma-100k-screen	0.461040	0.466300	2.673816	6.3	discard	four free local-pair emissions over-insert and regress Qwen and Mistral screens
 56349a8	qwen-mistral-gemma-100k-screen	0.460727	0.466300	2.674984	6.3	discard	three free local-pair emissions still over-insert on Mistral, confirming two-emission cap
+fde19ae	qwen36-o200k-100k-screen	0.456080	0.456080	2.677547	124.0	discard	string lexicon boundary/split repair accepted four pair overrides including empty many-to-one pieces and regressed hard Qwen screen
