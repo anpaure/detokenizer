@@ -39,7 +39,7 @@ SEED = int(os.environ.get("DETOK_SEED", DEFAULT_SEED))
 
 TOP_TOKENS = 50_000
 ANCHORS = 8_192
-CANDIDATE_WINDOW = 25_000
+CANDIDATE_WINDOW = 10_000
 ROUNDS = 6
 FREQ_WEIGHT = 0.12
 TORCH_TOPK = 64
@@ -109,6 +109,7 @@ def topk_edges(
     p_log: np.ndarray,
     mapping: np.ndarray,
     p_rank: np.ndarray,
+    candidate_window: int,
     device: str,
 ) -> list[tuple[float, int, int]]:
     p_log_t = torch.as_tensor(p_log[p_focus].astype(np.float32), dtype=torch.float32, device=device)
@@ -121,9 +122,9 @@ def topk_edges(
         sim = c_vec[start:stop] @ p_vec.T
         c_log_t = torch.as_tensor(c_log[c_ids].astype(np.float32), dtype=torch.float32, device=device)
         sim -= FREQ_WEIGHT * torch.abs(c_log_t[:, None] - p_log_t[None, :])
-        if CANDIDATE_WINDOW > 0:
+        if candidate_window > 0:
             centers = torch.as_tensor(p_rank[mapping[c_ids]].astype(np.int64), dtype=torch.long, device=device)
-            mask = torch.abs(p_rank_t[None, :] - centers[:, None]) <= CANDIDATE_WINDOW
+            mask = torch.abs(p_rank_t[None, :] - centers[:, None]) <= candidate_window
             sim = sim.masked_fill(~mask, -1.0e9)
         values, indices = torch.topk(sim, k=k, dim=1)
         values_cpu = values.detach().cpu().numpy()
@@ -139,6 +140,8 @@ def topk_edges(
 def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_size: int) -> np.ndarray:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device: {device}", flush=True)
+    candidate_window = 25_000 if len(cipher_ids) >= 1_000_000 else CANDIDATE_WINDOW
+    print(f"candidate_window: {candidate_window}", flush=True)
     c_counts = counts(cipher_ids, int(max(target_vocab_size, int(cipher_ids.max()) + 1)))
     p_counts = counts(ref_ids, target_vocab_size)
     c_order_all = np.argsort(-c_counts)
@@ -165,7 +168,18 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
             c_vec = normalize_features(torch.cat([c_left, c_right], dim=1), c_counts[c_focus], device)
             p_vec = normalize_features(torch.cat([p_left, p_right], dim=1), p_counts[p_focus], device)
             del c_left, c_right, p_left, p_right
-            edges = topk_edges(c_vec, p_vec, c_focus, p_focus, c_log, p_log, mapping, p_rank, device)
+            edges = topk_edges(
+                c_vec,
+                p_vec,
+                c_focus,
+                p_focus,
+                c_log,
+                p_log,
+                mapping,
+                p_rank,
+                candidate_window,
+                device,
+            )
             del c_vec, p_vec
             if device == "cuda":
                 torch.cuda.empty_cache()
