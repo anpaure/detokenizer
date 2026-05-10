@@ -119,6 +119,8 @@ Current accepted bests:
 |---|---:|
 | `core-100k` | `0.453876` |
 | `core-1m` | `0.267432` |
+| `core-100k-gemma` | `0.458608` |
+| `core-1m-gemma` | `0.277212` |
 | `core-10m-3pair` | `0.103947` |
 
 The complete experiment ledger is tracked in `results.tsv`. It includes accepted
