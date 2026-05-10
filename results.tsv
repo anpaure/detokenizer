@@ -147,3 +147,4 @@ bcb960a	core-100k-gemma	0.456392	0.466080	2.655394	6.3	keep	larger 1536-token ta
 a4a6ab8	core-100k-gemma	0.456372	0.464420	2.650276	6.3	keep	2048-token tail repair block slightly improves 100k suite mean and sharply improves max and BPB
 878fa58	qwen-mistral-gemma-100k-screen	0.460480	0.465520	2.667297	6.3	discard	3072-token tail repair block overrepairs Mistral and loses the three-pair screen versus accepted 2048
 88bc1ee	qwen36-o200k-100k-screen	0.454780	0.454780	2.703605	6.3	discard	target-side length-2 variable emissions accepted 14 expansions and over-inserted on hard Qwen screen
+dfd85ab	qwen36-o200k-100k-screen	0.451680	0.451680	2.693335	6.3	discard	high-margin variable emissions improved BPB but still lost exact CER on hard Qwen screen
