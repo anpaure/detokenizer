@@ -68,8 +68,6 @@ BIGRAM_REFINE_SKIP_WEIGHT = 0.4
 BIGRAM_REFINE_SKIP_MIN_TOKENS = 1_000_000
 BIGRAM_REFINE_SKIP_MAX_TOKENS = 1_000_000
 BIGRAM_REFINE_ALPHA = 0.05
-BIGRAM_WIDE_REPAIR = True
-BIGRAM_WIDE_REPAIR_EXTRA_PROPOSALS = 20_000
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -449,34 +447,11 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
                 candidate_window,
                 device,
             )
-            wide_repair_edges: list[tuple[float, int, int]] = []
-            if round_idx == rounds - 1 and BIGRAM_WIDE_REPAIR and BIGRAM_WIDE_REPAIR_EXTRA_PROPOSALS > 0:
-                wide_repair_edges = topk_edges(
-                    c_vec,
-                    p_vec,
-                    c_focus,
-                    p_focus,
-                    c_log,
-                    p_log,
-                    mapping,
-                    p_rank,
-                    0,
-                    device,
-                )
             del c_vec, p_vec
             if device == "cuda":
                 torch.cuda.empty_cache()
 
         edges.sort(reverse=True)
-        repair_edges = edges
-        if wide_repair_edges:
-            wide_repair_edges.sort(reverse=True)
-            normal_keep = max(0, BIGRAM_REFINE_MAX_PROPOSALS - BIGRAM_WIDE_REPAIR_EXTRA_PROPOSALS)
-            repair_edges = edges[:normal_keep] + wide_repair_edges
-            print(
-                f"wide_repair_edges={len(wide_repair_edges)} normal_repair_edges={min(len(edges), normal_keep)}",
-                flush=True,
-            )
         used_c: set[int] = set()
         used_p: set[int] = set()
         assigned_p_by_c: dict[int, int] = {}
@@ -533,7 +508,7 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
                 ref_ids,
                 mapping,
                 c_focus,
-                repair_edges,
+                edges,
                 target_vocab_size,
             )
         if use_dynamic_anchors and len(assigned_scores) >= 64:
