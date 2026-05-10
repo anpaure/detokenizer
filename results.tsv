@@ -136,3 +136,4 @@ d767768	qwen36-o200k-100k-screen	0.000000	0.000000	0.000000	6.3	crash	wordish ex
 2e26146	qwen36-o200k-100k-screen	0.460180	0.460180	2.730201	6.3	discard	count-adaptive unigram backoff destabilized hard 100k screen
 13b93d3	refine	0.000000	0.000000	0.000000	0.0	refine	[REFINE] jackknife wordish gating and adaptive smoothing all lost versus raw owner repair; try protecting high-frequency stable tokens
 345a327	qwen-mistral-gemma-100k-screen	0.460660	0.468760	2.684845	6.3	discard	protecting top owner tokens improved two screens but regressed Gemma max versus raw owner repair
+b1fe675	qwen36-o200k-100k-screen	0.456920	0.456920	2.722763	6.3	discard	hard owned-target tail guard rejected almost all tail repairs and regressed hard 100k screen
