@@ -55,6 +55,10 @@ LEARN_WEIGHT_TEMP = 0.07
 DYNAMIC_ANCHOR_MAX_TOKENS = 100_000
 ENABLE_DYNAMIC_ASSIGNMENT_SWAPS = True
 ASSIGNMENT_SWAP_MIN_GAIN = 0.01
+BIGRAM_OBJECTIVE_REFINE = True
+BIGRAM_REFINE_TOKENS = 2_048
+BIGRAM_REFINE_MAX_PROPOSALS = 25_000
+BIGRAM_REFINE_ALPHA = 0.05
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -217,6 +221,118 @@ def topk_edges(
     return edges
 
 
+def dense_bigram_counts(ids: np.ndarray, nodes: np.ndarray, vocab_floor: int) -> np.ndarray:
+    lookup = np.full(vocab_floor, -1, dtype=np.int32)
+    valid = nodes < vocab_floor
+    lookup[nodes[valid]] = np.arange(len(nodes), dtype=np.int32)[valid]
+    prev = lookup[ids[:-1]]
+    nxt = lookup[ids[1:]]
+    mask = (prev >= 0) & (nxt >= 0)
+    k = len(nodes)
+    if not bool(mask.any()):
+        return np.zeros((k, k), dtype=np.float32)
+    flat = prev[mask].astype(np.int64, copy=False) * k + nxt[mask].astype(np.int64, copy=False)
+    return np.bincount(flat, minlength=k * k).reshape(k, k).astype(np.float32)
+
+
+def bigram_swap_delta(c_big: np.ndarray, p_log: np.ndarray, perm: np.ndarray, a: int, b: int) -> float:
+    pa = int(perm[a])
+    pb = int(perm[b])
+    old = (
+        float(c_big[a, :] @ p_log[pa, perm])
+        + float(c_big[b, :] @ p_log[pb, perm])
+        + float(c_big[:, a] @ p_log[perm, pa])
+        + float(c_big[:, b] @ p_log[perm, pb])
+    )
+    new_perm = perm.copy()
+    new_perm[a], new_perm[b] = new_perm[b], new_perm[a]
+    new = (
+        float(c_big[a, :] @ p_log[pb, new_perm])
+        + float(c_big[b, :] @ p_log[pa, new_perm])
+        + float(c_big[:, a] @ p_log[new_perm, pb])
+        + float(c_big[:, b] @ p_log[new_perm, pa])
+    )
+    for i in (a, b):
+        for j in (a, b):
+            old -= float(c_big[i, j] * p_log[int(perm[i]), int(perm[j])])
+            new -= float(c_big[i, j] * p_log[int(new_perm[i]), int(new_perm[j])])
+    return new - old
+
+
+def refine_with_bigram_objective(
+    cipher_ids: np.ndarray,
+    ref_ids: np.ndarray,
+    mapping: np.ndarray,
+    c_focus: np.ndarray,
+    edges: list[tuple[float, int, int]],
+    target_vocab_size: int,
+) -> np.ndarray:
+    if not BIGRAM_OBJECTIVE_REFINE:
+        return mapping
+    k = min(BIGRAM_REFINE_TOKENS, len(c_focus))
+    c_nodes = c_focus[:k]
+    p_nodes_raw = mapping[c_nodes].astype(np.int64, copy=True)
+    keep = np.zeros(k, dtype=bool)
+    seen: set[int] = set()
+    for idx, p in enumerate(p_nodes_raw):
+        if int(p) in seen:
+            continue
+        seen.add(int(p))
+        keep[idx] = True
+    c_nodes = c_nodes[keep]
+    p_nodes = p_nodes_raw[keep]
+    k = len(c_nodes)
+    if k < 64:
+        return mapping
+
+    print(f"bigram_refine_tokens={k}", flush=True)
+    c_big = dense_bigram_counts(cipher_ids, c_nodes, len(mapping))
+    p_big = dense_bigram_counts(ref_ids, p_nodes, target_vocab_size)
+    row_totals = p_big.sum(axis=1, keepdims=True)
+    p_log = np.log((p_big + BIGRAM_REFINE_ALPHA) / (row_totals + BIGRAM_REFINE_ALPHA * k)).astype(np.float32)
+    perm = np.arange(k, dtype=np.int32)
+    owner = np.arange(k, dtype=np.int32)
+    c_to_i = {int(c): i for i, c in enumerate(c_nodes)}
+    p_to_i = {int(p): i for i, p in enumerate(p_nodes)}
+
+    proposals: list[tuple[int, int]] = []
+    seen_proposals: set[tuple[int, int]] = set()
+    for _, c, p in edges:
+        i = c_to_i.get(c)
+        p_idx = p_to_i.get(p)
+        if i is None or p_idx is None:
+            continue
+        key = (i, p_idx)
+        if key in seen_proposals:
+            continue
+        seen_proposals.add(key)
+        proposals.append(key)
+        if len(proposals) >= BIGRAM_REFINE_MAX_PROPOSALS:
+            break
+
+    swaps = 0
+    for i, p_idx in proposals:
+        j = int(owner[p_idx])
+        if i == j:
+            continue
+        delta = bigram_swap_delta(c_big, p_log, perm, i, j)
+        if delta <= 0.0:
+            continue
+        pi = int(perm[i])
+        pj = int(perm[j])
+        perm[i], perm[j] = perm[j], perm[i]
+        owner[pi], owner[pj] = owner[pj], owner[pi]
+        swaps += 1
+
+    if swaps:
+        refined = mapping.copy()
+        refined[c_nodes] = p_nodes[perm]
+        mapping = refined
+    print(f"bigram_refine_proposals={len(proposals)}", flush=True)
+    print(f"bigram_refine_swaps={swaps}", flush=True)
+    return mapping
+
+
 def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_size: int) -> np.ndarray:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device: {device}", flush=True)
@@ -352,6 +468,15 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
         for c, p in assigned_p_by_c.items():
             next_mapping[c] = p
         mapping = next_mapping
+        if round_idx == rounds - 1 and use_dynamic_anchors:
+            mapping = refine_with_bigram_objective(
+                cipher_ids,
+                ref_ids,
+                mapping,
+                c_focus,
+                edges,
+                target_vocab_size,
+            )
         if use_dynamic_anchors and len(assigned_scores) >= 64:
             assigned_scores.sort(reverse=True)
             next_anchor_rows: list[int] = []
