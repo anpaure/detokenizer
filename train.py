@@ -140,7 +140,7 @@ def topk_edges(
 def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_size: int) -> np.ndarray:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device: {device}", flush=True)
-    candidate_window = 20_000 if len(cipher_ids) >= 1_000_000 else CANDIDATE_WINDOW
+    candidate_window = 25_000 if len(cipher_ids) >= 1_000_000 else CANDIDATE_WINDOW
     print(f"candidate_window: {candidate_window}", flush=True)
     c_counts = counts(cipher_ids, int(max(target_vocab_size, int(cipher_ids.max()) + 1)))
     p_counts = counts(ref_ids, target_vocab_size)
