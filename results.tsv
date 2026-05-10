@@ -100,3 +100,5 @@ b8d9837	qwen36-o200k-1m-screen	0.288100	0.288100	2.767622	6.3	discard	held-out p
 fe9e07d	core-1m	0.270004	0.288520	2.729153	6.3	discard	quarter-weight skip bigrams improved BPB but lost mean CER versus half weight
 782324a	qwen36-o200k-1m-screen	0.275800	0.275800	2.766078	6.3	diagnostic	0.4 skip-bigram weight improves Qwen screen slightly; full suite not yet run
 0052f5c	core-1m	0.267432	0.282240	2.730158	6.3	keep	0.4 skip-bigram weight improves 1m mean and max versus accepted half-weight setting
+bc026aa	qwen36-o200k-1m-screen	0.280800	0.280800	2.763993	6.3	discard	fixed-context bigram swap objective worsened hard 1m screen
+bc026aa	core-100k	0.472880	0.482900	2.665038	6.3	discard	fixed-context bigram swap objective worsened low-data suite despite broader neighbor evidence
