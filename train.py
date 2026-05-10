@@ -871,7 +871,6 @@ def align_shuffled(
                 c_focus,
                 edges,
                 target_vocab_size,
-                target_wordish,
             )
             mapping = external_owner_repair(
                 cipher_ids,
@@ -881,6 +880,7 @@ def align_shuffled(
                 c_focus,
                 edges,
                 target_vocab_size,
+                target_wordish,
             )
         if use_dynamic_anchors and len(assigned_scores) >= 64:
             assigned_scores.sort(reverse=True)
