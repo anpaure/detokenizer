@@ -86,12 +86,6 @@ TAIL_REPAIR_NODES = 2_048
 TAIL_REPAIR_CONTEXTS = 8_192
 TAIL_REPAIR_CANDIDATES = 8
 TAIL_REPAIR_MIN_GAIN_PER_OCC = 0.30
-LCB_TAIL_REPAIR = True
-LCB_TAIL_MAX_TOKENS = 100_000
-LCB_TAIL_SHARDS = 5
-LCB_TAIL_LAMBDA = 1.0
-LCB_TAIL_MIN_SHARD_POSITIVE = 3
-LCB_TAIL_SKIP_FLOOR = -0.25
 EXTERNAL_OWNER_REPAIR = True
 EXTERNAL_OWNER_MAX_TOKENS = 100_000
 EXTERNAL_OWNER_NODES = 2_048
@@ -738,21 +732,18 @@ def tail_unary_repair(
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     with torch.no_grad():
-        right_scores_t = torch.as_tensor(c_right, dtype=torch.float32, device=device) @ torch.as_tensor(
+        scores = torch.as_tensor(c_right, dtype=torch.float32, device=device) @ torch.as_tensor(
             p_right_log, dtype=torch.float32, device=device
         ).T
-        left_scores_t = (
+        scores.add_(
             torch.as_tensor(c_left, dtype=torch.float32, device=device)
             @ torch.as_tensor(p_left_log, dtype=torch.float32, device=device)
         )
-        score_np = (right_scores_t + left_scores_t).cpu().numpy()
-        right_score_np = right_scores_t.cpu().numpy()
-        left_score_np = left_scores_t.cpu().numpy()
+        score_np = scores.cpu().numpy()
 
     repaired = mapping.copy()
     accepted = 0
     accepted_gain_per_occ: list[float] = []
-    proposals: list[tuple[int, int, int, float, float, float]] = []
     for row, c in enumerate(tail_arr):
         cand = candidates_by_c[int(c)]
         if len(cand) <= 1:
@@ -766,93 +757,9 @@ def tail_unary_repair(
         occ = max(1.0, float(c_counts[int(c)]))
         if best_local == current_local or gain / occ < TAIL_REPAIR_MIN_GAIN_PER_OCC:
             continue
-        best_idx = cand_idx[best_local]
-        current_idx = cand_idx[current_local]
-        if LCB_TAIL_REPAIR and len(cipher_ids) <= LCB_TAIL_MAX_TOKENS:
-            right_gain = float(right_score_np[row, best_idx] - right_score_np[row, current_idx])
-            left_gain = float(left_score_np[row, best_idx] - left_score_np[row, current_idx])
-            if right_gain <= 0.0 or left_gain <= 0.0:
-                continue
-            proposals.append((row, current_idx, best_idx, gain, right_gain, left_gain))
-            continue
         repaired[int(c)] = cand[best_local]
         accepted += 1
         accepted_gain_per_occ.append(gain / occ)
-    if LCB_TAIL_REPAIR and len(cipher_ids) <= LCB_TAIL_MAX_TOKENS and proposals:
-        c_right2 = dense_cross_bigram_counts(cipher_ids, tail_arr, context_c_arr, len(mapping), offset=2)
-        c_left2 = dense_cross_bigram_counts(cipher_ids, context_c_arr, tail_arr, len(mapping), offset=2).T
-        p_right2 = dense_cross_bigram_counts(ref_ids, candidate_p_arr, context_p_arr, target_vocab_size, offset=2)
-        p_left2 = dense_cross_bigram_counts(ref_ids, context_p_arr, candidate_p_arr, target_vocab_size, offset=2)
-        p_right2_log = np.log(
-            (p_right2 + BIGRAM_REFINE_ALPHA)
-            / (p_right2.sum(axis=1, keepdims=True) + BIGRAM_REFINE_ALPHA * len(context_p_arr))
-        ).astype(np.float32)
-        p_left2_log = np.log(
-            (p_left2 + BIGRAM_REFINE_ALPHA)
-            / (p_left2.sum(axis=1, keepdims=True) + BIGRAM_REFINE_ALPHA * len(candidate_p_arr))
-        ).astype(np.float32)
-        shard_views: list[tuple[np.ndarray, np.ndarray]] = []
-        shard_count = max(1, LCB_TAIL_SHARDS)
-        shard_len = max(2, len(cipher_ids) // shard_count)
-        for shard_idx in range(shard_count):
-            start_pos = shard_idx * shard_len
-            stop_pos = len(cipher_ids) if shard_idx == shard_count - 1 else min(len(cipher_ids), (shard_idx + 1) * shard_len)
-            if stop_pos - start_pos < 4:
-                continue
-            shard = cipher_ids[start_pos:stop_pos]
-            shard_right = dense_cross_bigram_counts(shard, tail_arr, context_c_arr, len(mapping))
-            shard_left = dense_cross_bigram_counts(shard, context_c_arr, tail_arr, len(mapping)).T
-            shard_views.append((shard_right, shard_left))
-        lcb_checked = len(proposals)
-        lcb_accepted = 0
-        lcb_reject_direction = 0
-        lcb_reject_skip = 0
-        lcb_reject_shard = 0
-        accepted_lcbs: list[float] = []
-        for row, current_idx, best_idx, gain, _, _ in proposals:
-            skip_delta = float(c_right2[row] @ (p_right2_log[best_idx] - p_right2_log[current_idx]))
-            skip_delta += float(c_left2[row] @ (p_left2_log[:, best_idx] - p_left2_log[:, current_idx]))
-            if skip_delta < LCB_TAIL_SKIP_FLOOR * gain:
-                lcb_reject_skip += 1
-                continue
-            shard_deltas = np.asarray(
-                [
-                    float(sr[row] @ (p_right_log[best_idx] - p_right_log[current_idx]))
-                    + float(sl[row] @ (p_left_log[:, best_idx] - p_left_log[:, current_idx]))
-                    for sr, sl in shard_views
-                ],
-                dtype=np.float32,
-            )
-            if shard_deltas.size == 0:
-                lcb_reject_shard += 1
-                continue
-            positive = int(np.count_nonzero(shard_deltas > 0.0))
-            if positive < min(LCB_TAIL_MIN_SHARD_POSITIVE, len(shard_deltas)):
-                lcb_reject_shard += 1
-                continue
-            median = float(np.median(shard_deltas))
-            mad = float(np.median(np.abs(shard_deltas - median)))
-            lcb = median - LCB_TAIL_LAMBDA * mad
-            if lcb <= 0.0:
-                lcb_reject_shard += 1
-                continue
-            c_int = int(tail_arr[row])
-            repaired[c_int] = int(candidate_p_arr[best_idx])
-            accepted += 1
-            lcb_accepted += 1
-            occ = max(1.0, float(c_counts[c_int]))
-            accepted_gain_per_occ.append(gain / occ)
-            accepted_lcbs.append(lcb / occ)
-        print(
-            f"tail_lcb_checked={lcb_checked} accepted={lcb_accepted} "
-            f"reject_skip={lcb_reject_skip} reject_shard={lcb_reject_shard} reject_direction={lcb_reject_direction}",
-            flush=True,
-        )
-        if accepted_lcbs:
-            arr = np.asarray(accepted_lcbs, dtype=np.float32)
-            print(f"tail_lcb_per_occ_median={float(np.median(arr)):.6f}", flush=True)
-            print(f"tail_lcb_per_occ_p10={float(np.percentile(arr, 10)):.6f}", flush=True)
-            print(f"tail_lcb_per_occ_p90={float(np.percentile(arr, 90)):.6f}", flush=True)
     print(f"tail_repair_nodes={len(tail_arr)} candidates={len(candidate_p_arr)} accepted={accepted}", flush=True)
     if accepted_gain_per_occ:
         gain_arr = np.asarray(accepted_gain_per_occ, dtype=np.float32)
