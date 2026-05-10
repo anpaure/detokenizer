@@ -110,7 +110,7 @@ STRING_LEXICON_MIN_GAIN_PER_BYTE = 0.050
 STRING_LEXICON_MAX_ACCEPTED = 2
 STRING_LEXICON_ALLOW_EMPTY_SPLITS = False
 STRING_LEXICON_FORMAT_ONLY = True
-STRING_CANDIDATE_REPAIR = True
+STRING_CANDIDATE_REPAIR = False
 STRING_CANDIDATE_MAX_TOKENS = 100_000
 STRING_CANDIDATE_NODES = 128
 STRING_CANDIDATE_REF_TOKENS = 8_192
@@ -122,6 +122,12 @@ STRING_CANDIDATE_CONTEXT_RADIUS = 4
 STRING_CANDIDATE_MAX_CHARS = 24
 STRING_CANDIDATE_MIN_GAIN_PER_BYTE = 0.10
 STRING_CANDIDATE_MAX_ACCEPTED = 2
+SINKHORN_EDGE_REWEIGHT = True
+SINKHORN_MAX_TOKENS = 100_000
+SINKHORN_NODES = 2_048
+SINKHORN_ITERS = 20
+SINKHORN_TEMP = 0.08
+SINKHORN_WEIGHT = 0.25
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -282,6 +288,57 @@ def topk_edges(
                     continue
                 edges.append((float(score), int(c), int(p_focus[int(col)])))
     return edges
+
+
+def sinkhorn_reweight_edges(edges: list[tuple[float, int, int]], c_focus: np.ndarray) -> list[tuple[float, int, int]]:
+    if not SINKHORN_EDGE_REWEIGHT or not edges:
+        return edges
+    selected_c = set(map(int, c_focus[: min(SINKHORN_NODES, len(c_focus))]))
+    selected_edges = [(score, c, p) for score, c, p in edges if c in selected_c]
+    if len(selected_edges) < 1024:
+        return edges
+
+    c_nodes = sorted({c for _, c, _ in selected_edges})
+    p_nodes = sorted({p for _, _, p in selected_edges})
+    if len(c_nodes) < 64 or len(p_nodes) < 64:
+        return edges
+    c_pos = {c: i for i, c in enumerate(c_nodes)}
+    p_pos = {p: i for i, p in enumerate(p_nodes)}
+    score_mat = np.full((len(c_nodes), len(p_nodes)), -np.inf, dtype=np.float32)
+    for score, c, p in selected_edges:
+        row = c_pos[c]
+        col = p_pos[p]
+        if score > score_mat[row, col]:
+            score_mat[row, col] = score
+
+    row_max = np.max(score_mat, axis=1, keepdims=True)
+    row_max[~np.isfinite(row_max)] = 0.0
+    weights = np.exp((score_mat - row_max) / max(SINKHORN_TEMP, 1.0e-4), where=np.isfinite(score_mat), out=np.zeros_like(score_mat))
+    for _ in range(SINKHORN_ITERS):
+        row_sum = weights.sum(axis=1, keepdims=True)
+        weights /= np.maximum(row_sum, 1.0e-12)
+        col_sum = weights.sum(axis=0, keepdims=True)
+        weights /= np.maximum(col_sum, 1.0)
+    row_sum = weights.sum(axis=1, keepdims=True)
+    weights /= np.maximum(row_sum, 1.0e-12)
+
+    reweighted: list[tuple[float, int, int]] = []
+    touched = 0
+    for score, c, p in edges:
+        row = c_pos.get(c)
+        col = p_pos.get(p)
+        if row is None or col is None:
+            reweighted.append((score, c, p))
+            continue
+        prob = float(weights[row, col])
+        reweighted.append((score + SINKHORN_WEIGHT * prob, c, p))
+        touched += 1
+    print(
+        f"sinkhorn_reweight_c={len(c_nodes)} p={len(p_nodes)} edges={touched} "
+        f"prob_max={float(weights.max()):.6f}",
+        flush=True,
+    )
+    return reweighted
 
 
 def dense_bigram_counts(ids: np.ndarray, nodes: np.ndarray, vocab_floor: int, offset: int = 1) -> np.ndarray:
@@ -824,6 +881,8 @@ def align_shuffled(
             if device == "cuda":
                 torch.cuda.empty_cache()
 
+        if len(cipher_ids) <= SINKHORN_MAX_TOKENS:
+            edges = sinkhorn_reweight_edges(edges, c_focus)
         edges.sort(reverse=True)
         used_c: set[int] = set()
         used_p: set[int] = set()
