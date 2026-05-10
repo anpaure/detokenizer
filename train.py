@@ -8,7 +8,9 @@ cer50k.
 
 from __future__ import annotations
 
+from collections import defaultdict
 import json
+import math
 import os
 import time
 from pathlib import Path
@@ -36,6 +38,11 @@ TARGET_TOKENS = int(os.environ.get("DETOK_TARGET_TOKENS", DEFAULT_TARGET_TOKENS)
 REFERENCE_TOKENS = int(os.environ.get("DETOK_REFERENCE_TOKENS", DEFAULT_REFERENCE_TOKENS))
 SAMPLE_TOKENS = int(os.environ.get("DETOK_SAMPLE_TOKENS", DEFAULT_SAMPLE_TOKENS))
 SEED = int(os.environ.get("DETOK_SEED", DEFAULT_SEED))
+MERGE_EQUIV_AUDIT = os.environ.get("DETOK_MERGE_EQUIV_AUDIT", "0") == "1"
+MERGE_EQUIV_TYPES = int(os.environ.get("DETOK_MERGE_EQUIV_TYPES", "4096"))
+MERGE_EQUIV_PAIRS = int(os.environ.get("DETOK_MERGE_EQUIV_PAIRS", "2000"))
+MERGE_EQUIV_CANDIDATES = int(os.environ.get("DETOK_MERGE_EQUIV_CANDIDATES", "64"))
+MERGE_EQUIV_CONTEXT_TOP = int(os.environ.get("DETOK_MERGE_EQUIV_CONTEXT_TOP", "64"))
 
 TOP_TOKENS = 50_000
 ANCHORS = 8_192
@@ -542,6 +549,249 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
     return mapping
 
 
+def inverse_permutation(perm: np.ndarray) -> np.ndarray:
+    inv = np.empty(len(perm), dtype=np.int64)
+    inv[np.asarray(perm, dtype=np.int64)] = np.arange(len(perm), dtype=np.int64)
+    return inv
+
+
+def decoded_piece(adapter, token_id: int, cache: dict[int, str]) -> str:
+    token_id = int(token_id)
+    if token_id not in cache:
+        cache[token_id] = adapter.decode([token_id])
+    return cache[token_id]
+
+
+def entropy(bucket: dict[int, int]) -> float:
+    total = float(sum(bucket.values()))
+    if total <= 0.0:
+        return 0.0
+    return float(-sum((count / total) * math.log(count / total) for count in bucket.values()))
+
+
+def auc_from_scores(labels: list[int], scores: list[float]) -> float:
+    if not labels or len(set(labels)) < 2:
+        return 0.5
+    y = np.asarray(labels, dtype=np.int64)
+    s = np.asarray(scores, dtype=np.float64)
+    order = np.argsort(s)
+    ranks = np.empty(len(s), dtype=np.float64)
+    i = 0
+    while i < len(s):
+        j = i + 1
+        while j < len(s) and s[order[j]] == s[order[i]]:
+            j += 1
+        ranks[order[i:j]] = (i + j - 1) / 2.0 + 1.0
+        i = j
+    pos = y == 1
+    n_pos = int(pos.sum())
+    n_neg = len(y) - n_pos
+    if n_pos == 0 or n_neg == 0:
+        return 0.5
+    return float((ranks[pos].sum() - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg))
+
+
+def top_precision(labels: list[int], scores: list[float], k: int) -> float:
+    if not labels:
+        return 0.0
+    order = np.argsort(-np.asarray(scores, dtype=np.float64))[: min(k, len(labels))]
+    return float(np.asarray(labels, dtype=np.float64)[order].mean()) if len(order) else 0.0
+
+
+def sparse_cosine(a: dict[int, int], b: dict[int, int]) -> float:
+    if not a or not b:
+        return 0.0
+    if len(a) > len(b):
+        a, b = b, a
+    dot = float(sum(value * b.get(key, 0) for key, value in a.items()))
+    norm_a = math.sqrt(sum(value * value for value in a.values()))
+    norm_b = math.sqrt(sum(value * value for value in b.values()))
+    return dot / max(1e-12, norm_a * norm_b)
+
+
+def top_bucket(bucket: dict[int, int], limit: int) -> dict[int, int]:
+    if len(bucket) <= limit:
+        return dict(bucket)
+    return dict(sorted(bucket.items(), key=lambda item: item[1], reverse=True)[:limit])
+
+
+def leading_space_label(piece: str) -> bool:
+    return piece.startswith(" ") or piece.startswith(chr(0x0120)) or piece.startswith(chr(0x2581))
+
+
+def whitespace_graph_audit(sample: np.ndarray, task, inv_perm: np.ndarray) -> dict[str, float]:
+    counts_arr = np.bincount(sample, minlength=int(sample.max(initial=0)) + 1)
+    focus = [int(t) for t in np.argsort(-counts_arr)[: min(MERGE_EQUIV_TYPES, np.count_nonzero(counts_arr))]]
+    focus_set = set(focus)
+    left: dict[int, dict[int, int]] = defaultdict(dict)
+    right: dict[int, dict[int, int]] = defaultdict(dict)
+    for pos, token_raw in enumerate(sample):
+        token = int(token_raw)
+        if token not in focus_set:
+            continue
+        if pos > 0:
+            prev = int(sample[pos - 1])
+            left[token][prev] = left[token].get(prev, 0) + 1
+        if pos + 1 < len(sample):
+            nxt = int(sample[pos + 1])
+            right[token][nxt] = right[token].get(nxt, 0) + 1
+    cache: dict[int, str] = {}
+    labels: list[int] = []
+    right_minus_left: list[float] = []
+    left_minus_right: list[float] = []
+    freq_scores: list[float] = []
+    for token in focus:
+        piece = decoded_piece(task.source_adapter, int(inv_perm[token]), cache) if 0 <= token < len(inv_perm) else ""
+        labels.append(1 if leading_space_label(piece) else 0)
+        l_ent = entropy(left.get(token, {}))
+        r_ent = entropy(right.get(token, {}))
+        freq = math.log1p(int(counts_arr[token]))
+        right_minus_left.append(r_ent - l_ent + 0.05 * freq)
+        left_minus_right.append(l_ent - r_ent + 0.05 * freq)
+        freq_scores.append(freq)
+
+    # Spectral proxy: tokens with similar predecessor/successor imbalance should
+    # separate along the dominant transition residual direction.
+    spectral_focus = focus[: min(1024, len(focus))]
+    idx = {token: row for row, token in enumerate(spectral_focus)}
+    mat = np.zeros((len(spectral_focus), len(spectral_focus)), dtype=np.float32)
+    for pos in range(len(sample) - 1):
+        a = int(sample[pos])
+        b = int(sample[pos + 1])
+        ia = idx.get(a)
+        ib = idx.get(b)
+        if ia is not None and ib is not None:
+            mat[ia, ib] += 1.0
+    if mat.size:
+        row = mat.sum(axis=1, keepdims=True)
+        col = mat.sum(axis=0, keepdims=True)
+        total = float(mat.sum())
+        residual = mat / np.maximum(row, 1.0) - col / max(total, 1.0)
+        _, _, vh = np.linalg.svd(residual, full_matrices=False)
+        spectral_small = vh[0].astype(np.float64).tolist()
+        spectral_labels = labels[: len(spectral_small)]
+        if auc_from_scores(spectral_labels, spectral_small) < 0.5:
+            spectral_small = [-value for value in spectral_small]
+    else:
+        spectral_small = []
+        spectral_labels = []
+    report = {
+        "space_positive_rate": float(np.mean(labels)) if labels else 0.0,
+        "right_left_auc": auc_from_scores(labels, right_minus_left),
+        "left_right_auc": auc_from_scores(labels, left_minus_right),
+        "freq_auc": auc_from_scores(labels, freq_scores),
+        "spectral_auc": auc_from_scores(spectral_labels, spectral_small),
+        "spectral_top100_precision": top_precision(spectral_labels, spectral_small, 100),
+        "left_right_top100_precision": top_precision(labels, left_minus_right, 100),
+    }
+    print(
+        "whitespace_graph_audit "
+        + " ".join(f"{key}={value:.6f}" for key, value in report.items()),
+        flush=True,
+    )
+    return report
+
+
+def merge_equivalence_audit(task, mapping: np.ndarray, baseline_metrics: dict[str, float]) -> dict[str, object]:
+    print("merge_equiv_audit=1", flush=True)
+    sample = np.asarray(task.cipher_ids[:SAMPLE_TOKENS], dtype=np.int64)
+    inv_perm = inverse_permutation(task.perm)
+    whitespace_report = whitespace_graph_audit(sample, task, inv_perm)
+
+    counts_arr = np.bincount(sample, minlength=int(sample.max(initial=0)) + 1)
+    focus = [int(t) for t in np.argsort(-counts_arr)[: min(MERGE_EQUIV_TYPES, np.count_nonzero(counts_arr))]]
+    focus_set = set(focus)
+    token_left: dict[int, dict[int, int]] = defaultdict(dict)
+    token_right: dict[int, dict[int, int]] = defaultdict(dict)
+    pair_counts: dict[tuple[int, int], int] = defaultdict(int)
+    pair_left: dict[tuple[int, int], dict[int, int]] = defaultdict(dict)
+    pair_right: dict[tuple[int, int], dict[int, int]] = defaultdict(dict)
+    for pos in range(len(sample)):
+        token = int(sample[pos])
+        if token in focus_set:
+            if pos > 0:
+                prev = int(sample[pos - 1])
+                token_left[token][prev] = token_left[token].get(prev, 0) + 1
+            if pos + 1 < len(sample):
+                nxt = int(sample[pos + 1])
+                token_right[token][nxt] = token_right[token].get(nxt, 0) + 1
+        if pos + 1 < len(sample):
+            a = int(sample[pos])
+            b = int(sample[pos + 1])
+            if a in focus_set and b in focus_set:
+                pair = (a, b)
+                pair_counts[pair] += 1
+                if pos > 0:
+                    prev = int(sample[pos - 1])
+                    pair_left[pair][prev] = pair_left[pair].get(prev, 0) + 1
+                if pos + 2 < len(sample):
+                    nxt = int(sample[pos + 2])
+                    pair_right[pair][nxt] = pair_right[pair].get(nxt, 0) + 1
+
+    candidate_tokens = focus[: min(MERGE_EQUIV_CANDIDATES, len(focus))]
+    source_cache: dict[int, str] = {}
+    piece_to_tokens: dict[str, list[int]] = defaultdict(list)
+    for token in focus:
+        if 0 <= token < len(inv_perm):
+            piece_to_tokens[decoded_piece(task.source_adapter, int(inv_perm[token]), source_cache)].append(token)
+    labels: list[int] = []
+    scores: list[float] = []
+    count_scores: list[float] = []
+    checked = 0
+    positive = 0
+    oracle_merge_exists = 0
+    oracle_merge_mass = 0
+    pairs = sorted(pair_counts.items(), key=lambda item: item[1], reverse=True)[:MERGE_EQUIV_PAIRS]
+    for (a, b), pair_count in pairs:
+        if a >= len(inv_perm) or b >= len(inv_perm):
+            continue
+        piece_a = decoded_piece(task.source_adapter, int(inv_perm[a]), source_cache)
+        piece_b = decoded_piece(task.source_adapter, int(inv_perm[b]), source_cache)
+        concat = piece_a + piece_b
+        if not concat or len(concat) > 64:
+            continue
+        if any(token not in (a, b) for token in piece_to_tokens.get(concat, [])):
+            oracle_merge_exists += 1
+            oracle_merge_mass += pair_count
+        p_left = top_bucket(pair_left.get((a, b), {}), MERGE_EQUIV_CONTEXT_TOP)
+        p_right = top_bucket(pair_right.get((a, b), {}), MERGE_EQUIV_CONTEXT_TOP)
+        for c in candidate_tokens:
+            if c == a or c == b or c >= len(inv_perm):
+                continue
+            t_left = top_bucket(token_left.get(c, {}), MERGE_EQUIV_CONTEXT_TOP)
+            t_right = top_bucket(token_right.get(c, {}), MERGE_EQUIV_CONTEXT_TOP)
+            context_score = 0.5 * sparse_cosine(p_left, t_left) + 0.5 * sparse_cosine(p_right, t_right)
+            freq_score = -abs(math.log1p(pair_count) - math.log1p(int(counts_arr[c])))
+            score = context_score + 0.05 * freq_score
+            piece_c = decoded_piece(task.source_adapter, int(inv_perm[c]), source_cache)
+            label = int(piece_c == concat)
+            labels.append(label)
+            scores.append(score)
+            count_scores.append(freq_score)
+            checked += 1
+            positive += label
+
+    report = {
+        "pairs": float(len(pairs)),
+        "checked": float(checked),
+        "positive_rate": positive / max(1, checked),
+        "oracle_merge_pair_rate": oracle_merge_exists / max(1, len(pairs)),
+        "oracle_merge_mass_rate": oracle_merge_mass / max(1, sum(count for _, count in pairs)),
+        "context_auc": auc_from_scores(labels, scores),
+        "context_top100_precision": top_precision(labels, scores, 100),
+        "context_top500_precision": top_precision(labels, scores, 500),
+        "count_auc": auc_from_scores(labels, count_scores),
+        "baseline_cer50k": float(baseline_metrics["cer50k"]),
+        "baseline_bpb": float(baseline_metrics["byte_lm_bpb"]),
+    }
+    print(
+        "merge_equiv_report "
+        + " ".join(f"{key}={value:.6f}" for key, value in report.items()),
+        flush=True,
+    )
+    return {"merge_equiv": report, "whitespace": whitespace_report}
+
+
 def main() -> None:
     t0 = time.time()
     task = load_task(
@@ -560,6 +810,7 @@ def main() -> None:
     mapped_sample = mapping[task.cipher_ids[:SAMPLE_TOKENS]]
     recovered_sample = task.target_adapter.decode(mapped_sample.tolist())
     metrics = evaluate_recovery(task, recovered_sample, SAMPLE_TOKENS)
+    merge_equiv_report = merge_equivalence_audit(task, mapping, metrics) if MERGE_EQUIV_AUDIT else None
 
     out_dir = CACHE_DIR / "runs"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -586,6 +837,8 @@ def main() -> None:
         "metrics": metrics,
         "preview": recovered_sample[:1000],
     }
+    if merge_equiv_report is not None:
+        report["merge_equiv_audit"] = merge_equiv_report
     (out_dir / "last_report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
 
     print("---")
