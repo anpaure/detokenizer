@@ -168,3 +168,4 @@ cce4022	qwen36-o200k-100k-screen	0.456560	0.456560	2.719339	116.8	discard	LCB-ga
 b6388de	qwen36-o200k-100k-screen	0.452280	0.452280	2.692203	109.7	discard	LCB-gated variable emissions changed surviving emissions and regressed hard Qwen screen
 b57c0ed	qwen36-o200k-100k-diagnostics	0.451320	0.451320	2.694811	106.8	diagnostic	oracle candidate recall shows single-token oracle mass 99.94%, current mapping top1 69.3%, edge top64 80.8%; candidate selection remains bottleneck
 fc2bbb7	qwen36-o200k-100k-screen	0.456140	0.456140	2.718997	105.5	discard	owner-closed tail repair resolved 217 swaps but rejected too many useful tail repairs and underfit hard Qwen screen
+dfcc3a5	oracle-reranker-100k-diagnostic	0.668605	0.679743	0.000000	6.3	diagnostic	leave-one-pair-out oracle linear reranker improves raw edge top1 but loses to current repaired mapping top1 0.677249, so synthetic reranker path is not pursued
