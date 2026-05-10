@@ -97,9 +97,22 @@ VARIABLE_EMISSION_MIN_COUNT = 10
 VARIABLE_EMISSION_MIN_GAIN_PER_OCC = 5.00
 VARIABLE_EMISSION_MAX_ACCEPTED = 2
 VARIABLE_EMISSION_FREE_LOCAL_PAIRS = True
+OPEN_BLOCK_ASSIGNMENT = os.environ.get("DETOK_OPEN_BLOCK_ASSIGNMENT", "0") == "1"
+OPEN_BLOCK_MAX_TOKENS = int(os.environ.get("DETOK_OPEN_BLOCK_MAX_TOKENS", "100000"))
+OPEN_BLOCK_NODES = int(os.environ.get("DETOK_OPEN_BLOCK_NODES", "2048"))
+OPEN_BLOCK_CANDIDATES = int(os.environ.get("DETOK_OPEN_BLOCK_CANDIDATES", "16"))
+OPEN_BLOCK_SIZE = int(os.environ.get("DETOK_OPEN_BLOCK_SIZE", "16"))
+OPEN_BLOCK_PASSES = int(os.environ.get("DETOK_OPEN_BLOCK_PASSES", "2"))
+OPEN_BLOCK_UNARY_WEIGHT = float(os.environ.get("DETOK_OPEN_BLOCK_UNARY_WEIGHT", "0.08"))
+OPEN_BLOCK_MOVE_PENALTY = float(os.environ.get("DETOK_OPEN_BLOCK_MOVE_PENALTY", "0.10"))
+OPEN_BLOCK_MIN_DELTA = float(os.environ.get("DETOK_OPEN_BLOCK_MIN_DELTA", "0.0"))
+OPEN_BLOCK_MAX_TARGET_POOL = int(os.environ.get("DETOK_OPEN_BLOCK_MAX_TARGET_POOL", "12000"))
 
 LAST_FINAL_EDGES: list[tuple[float, int, int]] = []
 LAST_C_FOCUS: np.ndarray = np.empty(0, dtype=np.int64)
+LAST_BIGRAM_C_NODES: set[int] = set()
+LAST_BIGRAM_P_NODES: set[int] = set()
+LAST_TAIL_NODES: set[int] = set()
 LAST_BIGRAM_CANDIDATES: dict[int, set[int]] = {}
 LAST_TAIL_CANDIDATES: dict[int, set[int]] = {}
 LAST_OWNER_CANDIDATES: dict[int, set[int]] = {}
@@ -327,6 +340,180 @@ def bigram_swap_delta(c_big: np.ndarray, p_log: np.ndarray, perm: np.ndarray, a:
     return new - old
 
 
+def build_graph_domains(
+    c_nodes: np.ndarray,
+    mapping: np.ndarray,
+    edges: list[tuple[float, int, int]],
+    candidates_per_node: int,
+) -> tuple[list[list[int]], list[dict[int, float]]]:
+    node_set = set(map(int, c_nodes))
+    domains: dict[int, list[int]] = {int(c): [int(mapping[int(c)])] for c in c_nodes}
+    scores: dict[int, dict[int, float]] = {int(c): {int(mapping[int(c)]): 0.0} for c in c_nodes}
+    top_score: dict[int, float] = {}
+    for score, c, p in edges:
+        c_int = int(c)
+        if c_int not in node_set:
+            continue
+        top_score.setdefault(c_int, float(score))
+        domain = domains[c_int]
+        if len(domain) >= candidates_per_node + 1:
+            continue
+        p_int = int(p)
+        if p_int in scores[c_int]:
+            continue
+        domain.append(p_int)
+        scores[c_int][p_int] = float(score) - top_score[c_int]
+    return [domains[int(c)] for c in c_nodes], [scores[int(c)] for c in c_nodes]
+
+
+def block_objective(c_big: np.ndarray, p_log: np.ndarray, assignment: np.ndarray, block: np.ndarray) -> float:
+    block_assign = assignment[block]
+    return float((c_big[block, :] * p_log[block_assign[:, None], assignment[None, :]]).sum()) + float(
+        (c_big[:, block] * p_log[assignment[:, None], block_assign[None, :]]).sum()
+    )
+
+
+def solve_greedy_block_assignment(
+    block: list[int],
+    domains_idx: list[list[int]],
+    unary_scores: list[dict[int, float]],
+    assignment: np.ndarray,
+    owner: dict[int, int],
+    c_big: np.ndarray,
+    p_log: np.ndarray,
+) -> dict[int, int]:
+    block_set = set(block)
+    used = {int(assignment[i]) for i in block}
+    proposal = {i: int(assignment[i]) for i in block}
+    rows: list[tuple[float, int, int, float]] = []
+    for i in block:
+        current = int(assignment[i])
+        current_score = float(c_big[i] @ p_log[current, assignment]) + float(c_big[:, i] @ p_log[assignment, current])
+        for p_idx in domains_idx[i]:
+            target_owner = owner.get(int(p_idx))
+            if target_owner is not None and target_owner not in block_set:
+                continue
+            score = float(c_big[i] @ p_log[p_idx, assignment]) + float(c_big[:, i] @ p_log[assignment, p_idx])
+            score += OPEN_BLOCK_UNARY_WEIGHT * unary_scores[i].get(int(p_idx), -1.0)
+            if p_idx != current:
+                score -= OPEN_BLOCK_MOVE_PENALTY
+            rows.append((score - current_score, i, int(p_idx), score))
+    rows.sort(reverse=True)
+    for _ in range(3):
+        changed = False
+        for gain, i, p_idx, _score in rows:
+            if gain <= 0.0:
+                break
+            current = int(proposal[i])
+            if p_idx == current:
+                continue
+            if p_idx in used:
+                continue
+            used.discard(current)
+            used.add(p_idx)
+            proposal[i] = p_idx
+            changed = True
+        if not changed:
+            break
+    return proposal
+
+
+def open_domain_block_assignment(
+    cipher_ids: np.ndarray,
+    ref_ids: np.ndarray,
+    mapping: np.ndarray,
+    c_focus: np.ndarray,
+    edges: list[tuple[float, int, int]],
+    target_vocab_size: int,
+) -> np.ndarray:
+    if not OPEN_BLOCK_ASSIGNMENT or len(cipher_ids) > OPEN_BLOCK_MAX_TOKENS:
+        return mapping
+    n = min(OPEN_BLOCK_NODES, len(c_focus))
+    if n < 64:
+        return mapping
+    c_nodes = c_focus[:n]
+    domains, unary_scores = build_graph_domains(c_nodes, mapping, edges, OPEN_BLOCK_CANDIDATES)
+    target_pool = sorted({int(p) for domain in domains for p in domain})
+    if len(target_pool) > OPEN_BLOCK_MAX_TARGET_POOL:
+        print(f"open_block_skipped_target_pool={len(target_pool)}", flush=True)
+        return mapping
+    target_arr = np.asarray(target_pool, dtype=np.int64)
+    target_pos = {int(p): i for i, p in enumerate(target_arr)}
+    domains_idx = [[target_pos[int(p)] for p in domain if int(p) in target_pos] for domain in domains]
+    assignment = np.asarray([target_pos[int(mapping[int(c)])] for c in c_nodes], dtype=np.int32)
+    c_big = dense_bigram_counts(cipher_ids, c_nodes, len(mapping))
+    p_big = dense_bigram_counts(ref_ids, target_arr, target_vocab_size)
+    row_totals = p_big.sum(axis=1, keepdims=True)
+    p_probs = (p_big + BIGRAM_REFINE_ALPHA) / (row_totals + BIGRAM_REFINE_ALPHA * len(target_arr))
+    p_log = np.log(p_probs).astype(np.float32)
+    owner: dict[int, int] = {}
+    for i, p_idx in enumerate(assignment):
+        owner.setdefault(int(p_idx), i)
+
+    accepted = 0
+    attempted = 0
+    accepted_deltas: list[float] = []
+    seed_order = list(range(n))
+    for _pass in range(OPEN_BLOCK_PASSES):
+        for seed in seed_order:
+            block: list[int] = []
+            seen: set[int] = set()
+            queue = [seed]
+            while queue and len(block) < OPEN_BLOCK_SIZE:
+                i = queue.pop(0)
+                if i in seen:
+                    continue
+                seen.add(i)
+                block.append(i)
+                for p_idx in domains_idx[i]:
+                    owned = owner.get(int(p_idx))
+                    if owned is not None and owned not in seen and len(block) + len(queue) < OPEN_BLOCK_SIZE:
+                        queue.append(owned)
+            if len(block) < 2:
+                continue
+            block_arr = np.asarray(block, dtype=np.int64)
+            old_score = block_objective(c_big, p_log, assignment, block_arr)
+            proposal = solve_greedy_block_assignment(block, domains_idx, unary_scores, assignment, owner, c_big, p_log)
+            if all(int(assignment[i]) == proposal[i] for i in block):
+                continue
+            new_assignment = assignment.copy()
+            for i, p_idx in proposal.items():
+                new_assignment[i] = int(p_idx)
+            new_score = block_objective(c_big, p_log, new_assignment, block_arr)
+            delta = new_score - old_score
+            attempted += 1
+            if delta <= OPEN_BLOCK_MIN_DELTA:
+                continue
+            old_targets = [int(assignment[i]) for i in block]
+            new_targets = [int(new_assignment[i]) for i in block]
+            if len(set(new_targets)) != len(new_targets):
+                continue
+            for i, old_p in zip(block, old_targets):
+                if owner.get(old_p) == i:
+                    del owner[old_p]
+            for i, new_p in zip(block, new_targets):
+                owner[int(new_p)] = i
+                assignment[i] = int(new_p)
+            accepted += 1
+            accepted_deltas.append(float(delta))
+
+    if accepted:
+        refined = mapping.copy()
+        for i, c in enumerate(c_nodes):
+            refined[int(c)] = int(target_arr[int(assignment[i])])
+        mapping = refined
+    print(
+        f"open_block_nodes={n} domains={sum(len(d) for d in domains)} target_pool={len(target_arr)} "
+        f"attempted={attempted} accepted={accepted}",
+        flush=True,
+    )
+    if accepted_deltas:
+        delta_arr = np.asarray(accepted_deltas, dtype=np.float32)
+        print(f"open_block_delta_median={float(np.median(delta_arr)):.6f}", flush=True)
+        print(f"open_block_delta_p90={float(np.percentile(delta_arr, 90)):.6f}", flush=True)
+    return mapping
+
+
 def refine_with_bigram_objective(
     cipher_ids: np.ndarray,
     ref_ids: np.ndarray,
@@ -336,8 +523,10 @@ def refine_with_bigram_objective(
     target_vocab_size: int,
     p_counts: np.ndarray,
 ) -> np.ndarray:
-    global LAST_BIGRAM_CANDIDATES
+    global LAST_BIGRAM_CANDIDATES, LAST_BIGRAM_C_NODES, LAST_BIGRAM_P_NODES
     LAST_BIGRAM_CANDIDATES = {}
+    LAST_BIGRAM_C_NODES = set()
+    LAST_BIGRAM_P_NODES = set()
     if not BIGRAM_OBJECTIVE_REFINE:
         return mapping
     token_budget = (
@@ -360,6 +549,8 @@ def refine_with_bigram_objective(
     k = len(c_nodes)
     if k < 64:
         return mapping
+    LAST_BIGRAM_C_NODES = set(map(int, c_nodes))
+    LAST_BIGRAM_P_NODES = set(map(int, p_nodes))
 
     use_skip_refine = BIGRAM_REFINE_SKIP_MIN_TOKENS <= len(cipher_ids) <= BIGRAM_REFINE_SKIP_MAX_TOKENS
     print(f"bigram_refine_token_budget={token_budget}", flush=True)
@@ -465,14 +656,16 @@ def tail_unary_repair(
     edges: list[tuple[float, int, int]],
     target_vocab_size: int,
 ) -> np.ndarray:
-    global LAST_TAIL_CANDIDATES
+    global LAST_TAIL_CANDIDATES, LAST_TAIL_NODES
     LAST_TAIL_CANDIDATES = {}
+    LAST_TAIL_NODES = set()
     if len(cipher_ids) > TAIL_REPAIR_MAX_TOKENS or TAIL_REPAIR_NODES <= 0:
         return mapping
     start = min(BIGRAM_REFINE_TOKENS, len(c_focus))
     tail_nodes = c_focus[start : min(len(c_focus), start + TAIL_REPAIR_NODES)]
     if len(tail_nodes) < 64:
         return mapping
+    LAST_TAIL_NODES = set(map(int, tail_nodes))
 
     context_c: list[int] = []
     context_p: list[int] = []
@@ -872,6 +1065,14 @@ def align_shuffled(
             next_mapping[c] = p
         mapping = next_mapping
         if round_idx == rounds - 1 and (use_dynamic_anchors or BIGRAM_REFINE_ALL_SCALES):
+            mapping = open_domain_block_assignment(
+                cipher_ids,
+                ref_ids,
+                mapping,
+                c_focus,
+                edges,
+                target_vocab_size,
+            )
             mapping = refine_with_bigram_objective(
                 cipher_ids,
                 ref_ids,
@@ -1327,6 +1528,40 @@ def oracle_audit(task, mapping: np.ndarray, emissions: dict[int, tuple[int, ...]
 
     owner_allowed = set(LAST_OWNER_CANDIDATES.keys()) & focus_set
     rows.append(run_pool("union_owner_conflict_types", union_pool, owner_allowed))
+
+    owner_by_target: dict[int, int] = {}
+    for c in LAST_C_FOCUS:
+        c_int = int(c)
+        p_int = int(mapping[c_int])
+        owner_by_target.setdefault(p_int, c_int)
+
+    graph_true = {c for c, true_p in truth.items() if true_p in graph_pool.get(c, set())}
+    graph_true_in_pnodes = {c for c in graph_true if truth[c] in LAST_BIGRAM_P_NODES}
+    graph_true_outside_pnodes = graph_true - graph_true_in_pnodes
+    graph_true_owned_by_head = {
+        c for c in graph_true if owner_by_target.get(truth[c]) in LAST_BIGRAM_C_NODES
+    }
+    graph_true_owned_by_tail = {
+        c for c in graph_true if owner_by_target.get(truth[c]) in LAST_TAIL_NODES
+    }
+    graph_true_owned_outside = {
+        c
+        for c in graph_true
+        if truth[c] in owner_by_target
+        and owner_by_target.get(truth[c]) not in LAST_BIGRAM_C_NODES
+        and owner_by_target.get(truth[c]) not in LAST_TAIL_NODES
+    }
+    graph_true_unowned = {c for c in graph_true if truth[c] not in owner_by_target}
+    rows.extend(
+        [
+            run_pool("graph_true_in_current_pnodes", graph_pool, graph_true_in_pnodes),
+            run_pool("graph_true_outside_current_pnodes", graph_pool, graph_true_outside_pnodes),
+            run_pool("graph_true_owned_by_head_source", graph_pool, graph_true_owned_by_head),
+            run_pool("graph_true_owned_by_tail_source", graph_pool, graph_true_owned_by_tail),
+            run_pool("graph_true_owned_by_outside_source", graph_pool, graph_true_owned_outside),
+            run_pool("graph_true_unowned_target", graph_pool, graph_true_unowned),
+        ]
+    )
 
     not_in_p_nodes = {
         c

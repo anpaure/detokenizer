@@ -151,3 +151,6 @@ dfd85ab	qwen36-o200k-100k-screen	0.451680	0.451680	2.693335	6.3	discard	high-mar
 2c77200	qwen-mistral-gemma-100k-screen	0.459920	0.464420	2.673779	6.3	discard	single strongest variable emission is CER-neutral on three-pair screen with only tiny BPB gain
 1406268	core-100k-gemma	0.456364	0.464420	2.649934	6.3	keep	free local-pair variable emission gives a tiny non-same-tokenizer 100k mean CER and BPB gain
 16a9052	qwen36-o200k-100k-oracle-audit	0.451460	0.451460	2.694996	6.3	diagnostic	union/graph top64 singleton oracle reaches 0.353360 CER, a 0.098100 gain; global candidate selection is the active bottleneck
+open-domain	qwen36-o200k-100k-reachability-audit	0.451460	0.451460	2.694996	6.3	diagnostic	graph true target split: 0.056260 CER gain inside current pnodes and 0.040020 outside, confirming both closed and open-domain assignment headroom
+open-domain	qwen36-o200k-100k-open-block-tiny	0.478280	0.478280	2.700004	6.3	discard	N2048 K16 block16 pass2 accepted 1147 block moves and badly overfit the internal bigram objective
+open-domain	qwen36-o200k-100k-open-block-conservative	0.460340	0.460340	2.699992	6.3	discard	one-pass high-penalty open block accepted 246 moves but still regressed versus accepted baseline, so broader suite and 1m guard were skipped
