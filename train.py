@@ -9,6 +9,7 @@ cer50k.
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from pathlib import Path
@@ -36,6 +37,9 @@ TARGET_TOKENS = int(os.environ.get("DETOK_TARGET_TOKENS", DEFAULT_TARGET_TOKENS)
 REFERENCE_TOKENS = int(os.environ.get("DETOK_REFERENCE_TOKENS", DEFAULT_REFERENCE_TOKENS))
 SAMPLE_TOKENS = int(os.environ.get("DETOK_SAMPLE_TOKENS", DEFAULT_SAMPLE_TOKENS))
 SEED = int(os.environ.get("DETOK_SEED", DEFAULT_SEED))
+UNSHUFFLED_SOURCE_IDS = os.environ.get("DETOK_UNSHUFFLED_SOURCE", "1") == "1"
+ID_PROXIMITY_WEIGHT = float(os.environ.get("DETOK_ID_PROXIMITY_WEIGHT", "0.05"))
+ID_CANDIDATE_WINDOW = int(os.environ.get("DETOK_ID_CANDIDATE_WINDOW", "0"))
 
 TOP_TOKENS = 50_000
 ANCHORS = 8_192
@@ -210,6 +214,8 @@ def topk_edges(
 ) -> list[tuple[float, int, int]]:
     p_log_t = torch.as_tensor(p_log[p_focus].astype(np.float32), dtype=torch.float32, device=device)
     p_rank_t = torch.as_tensor(p_rank[p_focus].astype(np.int64), dtype=torch.long, device=device)
+    p_id_t = torch.as_tensor(p_focus.astype(np.float32), dtype=torch.float32, device=device)
+    id_norm = math.log1p(max(int(c_focus.max(initial=0)), int(p_focus.max(initial=0)), 1))
     edges: list[tuple[float, int, int]] = []
     k = min(TORCH_TOPK, len(p_focus))
     for start in range(0, len(c_focus), TORCH_BATCH_SIZE):
@@ -218,9 +224,19 @@ def topk_edges(
         sim = c_vec[start:stop] @ p_vec.T
         c_log_t = torch.as_tensor(c_log[c_ids].astype(np.float32), dtype=torch.float32, device=device)
         sim -= FREQ_WEIGHT * torch.abs(c_log_t[:, None] - p_log_t[None, :])
+        id_delta = None
+        if UNSHUFFLED_SOURCE_IDS and ID_PROXIMITY_WEIGHT:
+            c_id_t = torch.as_tensor(c_ids.astype(np.float32), dtype=torch.float32, device=device)
+            id_delta = torch.abs(c_id_t[:, None] - p_id_t[None, :])
+            sim -= ID_PROXIMITY_WEIGHT * torch.log1p(id_delta) / id_norm
         if candidate_window > 0:
             centers = torch.as_tensor(p_rank[mapping[c_ids]].astype(np.int64), dtype=torch.long, device=device)
             mask = torch.abs(p_rank_t[None, :] - centers[:, None]) <= candidate_window
+            if UNSHUFFLED_SOURCE_IDS and ID_CANDIDATE_WINDOW > 0:
+                if id_delta is None:
+                    c_id_t = torch.as_tensor(c_ids.astype(np.float32), dtype=torch.float32, device=device)
+                    id_delta = torch.abs(c_id_t[:, None] - p_id_t[None, :])
+                mask = mask | (id_delta <= float(ID_CANDIDATE_WINDOW))
             sim = sim.masked_fill(~mask, -1.0e9)
         values, indices = torch.topk(sim, k=k, dim=1)
         values_cpu = values.detach().cpu().numpy()
@@ -553,11 +569,13 @@ def main() -> None:
     )
     print(f"source_tokenizer: {task.source_adapter.spec.name}")
     print(f"target_tokenizer: {task.target_adapter.spec.name}")
-    print(f"cipher_tokens: {len(task.cipher_ids):,}")
+    cipher_stream = task.secret_ids if UNSHUFFLED_SOURCE_IDS else task.cipher_ids
+    print(f"cipher_tokens: {len(cipher_stream):,}")
     print(f"reference_tokens: {len(task.ref_ids):,}")
+    print(f"unshuffled_source_ids: {UNSHUFFLED_SOURCE_IDS}")
 
-    mapping = align_shuffled(task.cipher_ids, task.ref_ids, task.target_adapter.spec.vocab_size)
-    mapped_sample = mapping[task.cipher_ids[:SAMPLE_TOKENS]]
+    mapping = align_shuffled(cipher_stream, task.ref_ids, task.target_adapter.spec.vocab_size)
+    mapped_sample = mapping[cipher_stream[:SAMPLE_TOKENS]]
     recovered_sample = task.target_adapter.decode(mapped_sample.tolist())
     metrics = evaluate_recovery(task, recovered_sample, SAMPLE_TOKENS)
 
@@ -567,7 +585,7 @@ def main() -> None:
     report = {
         "source_tokenizer": task.source_adapter.spec.name,
         "target_tokenizer": task.target_adapter.spec.name,
-        "target_tokens": int(len(task.cipher_ids)),
+        "target_tokens": int(len(cipher_stream)),
         "reference_tokens": int(len(task.ref_ids)),
         "sample_tokens": SAMPLE_TOKENS,
         "top_tokens": TOP_TOKENS,
@@ -582,6 +600,9 @@ def main() -> None:
         "bigram_refine_all_scales": BIGRAM_REFINE_ALL_SCALES,
         "skip_context_weight": SKIP_CONTEXT_WEIGHT,
         "learn_skip_weight": LEARN_SKIP_WEIGHT,
+        "unshuffled_source_ids": UNSHUFFLED_SOURCE_IDS,
+        "id_proximity_weight": ID_PROXIMITY_WEIGHT,
+        "id_candidate_window": ID_CANDIDATE_WINDOW,
         "elapsed_seconds": time.time() - t0,
         "metrics": metrics,
         "preview": recovered_sample[:1000],
@@ -594,7 +615,7 @@ def main() -> None:
     print(f"replacement_rate: {metrics['replacement_rate']:.8f}")
     print(f"printable_rate:   {metrics['printable_rate']:.8f}")
     print(f"elapsed_seconds:  {time.time() - t0:.1f}")
-    print(f"target_tokens_M:  {len(task.cipher_ids) / 1e6:.3f}")
+    print(f"target_tokens_M:  {len(cipher_stream) / 1e6:.3f}")
     print(f"reference_tokens_M: {len(task.ref_ids) / 1e6:.3f}")
     print(f"top_tokens:       {TOP_TOKENS}")
     print(f"anchors:          {ANCHORS}")
