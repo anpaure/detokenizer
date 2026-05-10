@@ -63,9 +63,7 @@ BIGRAM_REFINE_LARGE_TOKEN_MIN_TOKENS = 1_000_000
 BIGRAM_REFINE_LARGE_TOKEN_MAX_TOKENS = 1_000_000
 BIGRAM_REFINE_MAX_PROPOSALS = 100_000
 BIGRAM_REFINE_PASSES = 4
-BIGRAM_REFINE_LARGE_PASSES = 4
-BIGRAM_REFINE_VALIDATE_MIN_TOKENS = 1_000_000
-BIGRAM_REFINE_VALIDATE_MAX_TOKENS = 1_000_000
+BIGRAM_REFINE_LARGE_PASSES = 3
 BIGRAM_REFINE_ALPHA = 0.05
 
 
@@ -267,10 +265,6 @@ def bigram_swap_delta(c_big: np.ndarray, p_log: np.ndarray, perm: np.ndarray, a:
     return new - old
 
 
-def bigram_perm_score(c_big: np.ndarray, p_log: np.ndarray, perm: np.ndarray) -> float:
-    return float((c_big * p_log[np.ix_(perm, perm)]).sum())
-
-
 def refine_with_bigram_objective(
     cipher_ids: np.ndarray,
     ref_ids: np.ndarray,
@@ -302,17 +296,9 @@ def refine_with_bigram_objective(
     if k < 64:
         return mapping
 
-    use_validation = BIGRAM_REFINE_VALIDATE_MIN_TOKENS <= len(cipher_ids) <= BIGRAM_REFINE_VALIDATE_MAX_TOKENS
     print(f"bigram_refine_token_budget={token_budget}", flush=True)
     print(f"bigram_refine_tokens={k}", flush=True)
-    print(f"bigram_refine_validation={use_validation}", flush=True)
-    if use_validation:
-        split = len(cipher_ids) // 2
-        c_big = dense_bigram_counts(cipher_ids[:split], c_nodes, len(mapping))
-        c_big_val = dense_bigram_counts(cipher_ids[split:], c_nodes, len(mapping))
-    else:
-        c_big = dense_bigram_counts(cipher_ids, c_nodes, len(mapping))
-        c_big_val = None
+    c_big = dense_bigram_counts(cipher_ids, c_nodes, len(mapping))
     p_big = dense_bigram_counts(ref_ids, p_nodes, target_vocab_size)
     row_totals = p_big.sum(axis=1, keepdims=True)
     p_log = np.log((p_big + BIGRAM_REFINE_ALPHA) / (row_totals + BIGRAM_REFINE_ALPHA * k)).astype(np.float32)
@@ -338,9 +324,6 @@ def refine_with_bigram_objective(
 
     swaps = 0
     passes_run = 0
-    best_pass = 0
-    best_perm = perm.copy()
-    best_score = bigram_perm_score(c_big_val, p_log, perm) if c_big_val is not None else 0.0
     pass_budget = (
         BIGRAM_REFINE_LARGE_PASSES
         if BIGRAM_REFINE_LARGE_TOKEN_MIN_TOKENS <= len(cipher_ids) <= BIGRAM_REFINE_LARGE_TOKEN_MAX_TOKENS
@@ -362,17 +345,9 @@ def refine_with_bigram_objective(
             owner[pi], owner[pj] = owner[pj], owner[pi]
             pass_swaps += 1
         swaps += pass_swaps
-        if c_big_val is not None:
-            score = bigram_perm_score(c_big_val, p_log, perm)
-            if score > best_score:
-                best_score = score
-                best_pass = passes_run
-                best_perm = perm.copy()
         if pass_swaps == 0:
             break
 
-    if c_big_val is not None:
-        perm = best_perm
     if swaps:
         refined = mapping.copy()
         refined[c_nodes] = p_nodes[perm]
@@ -380,8 +355,6 @@ def refine_with_bigram_objective(
     print(f"bigram_refine_proposals={len(proposals)}", flush=True)
     print(f"bigram_refine_pass_budget={pass_budget}", flush=True)
     print(f"bigram_refine_passes={passes_run}", flush=True)
-    if c_big_val is not None:
-        print(f"bigram_refine_best_pass={best_pass}", flush=True)
     print(f"bigram_refine_swaps={swaps}", flush=True)
     return mapping
 
