@@ -55,6 +55,10 @@ def effective_rounds(num_cipher_tokens: int) -> int:
     return 8 if num_cipher_tokens >= 1_000_000 else ROUNDS
 
 
+def effective_top_tokens(num_cipher_tokens: int) -> int:
+    return 75_000 if num_cipher_tokens >= 1_000_000 else TOP_TOKENS
+
+
 def counts(ids: np.ndarray, size: int) -> np.ndarray:
     return np.bincount(ids.astype(np.int64, copy=False), minlength=size)
 
@@ -150,13 +154,14 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
     print(f"device: {device}", flush=True)
     candidate_window = effective_candidate_window(len(cipher_ids))
     rounds = effective_rounds(len(cipher_ids))
+    top_tokens = effective_top_tokens(len(cipher_ids))
     print(f"candidate_window: {candidate_window}", flush=True)
     c_counts = counts(cipher_ids, int(max(target_vocab_size, int(cipher_ids.max()) + 1)))
     p_counts = counts(ref_ids, target_vocab_size)
     c_order_all = np.argsort(-c_counts)
     p_order_all = np.argsort(-p_counts)
-    c_focus = c_order_all[: min(TOP_TOKENS, np.count_nonzero(c_counts))].astype(np.int64)
-    p_focus = p_order_all[: min(TOP_TOKENS, np.count_nonzero(p_counts))].astype(np.int64)
+    c_focus = c_order_all[: min(top_tokens, np.count_nonzero(c_counts))].astype(np.int64)
+    p_focus = p_order_all[: min(top_tokens, np.count_nonzero(p_counts))].astype(np.int64)
 
     mapping = np.zeros(max(len(c_counts), target_vocab_size), dtype=np.int64)
     init = c_order_all[: len(p_order_all)]
@@ -236,7 +241,7 @@ def main() -> None:
         "target_tokens": int(len(task.cipher_ids)),
         "reference_tokens": int(len(task.ref_ids)),
         "sample_tokens": SAMPLE_TOKENS,
-        "top_tokens": TOP_TOKENS,
+        "top_tokens": effective_top_tokens(len(task.cipher_ids)),
         "anchors": ANCHORS,
         "candidate_window": effective_candidate_window(len(task.cipher_ids)),
         "rounds": effective_rounds(len(task.cipher_ids)),
@@ -256,7 +261,7 @@ def main() -> None:
     print(f"elapsed_seconds:  {time.time() - t0:.1f}")
     print(f"target_tokens_M:  {len(task.cipher_ids) / 1e6:.3f}")
     print(f"reference_tokens_M: {len(task.ref_ids) / 1e6:.3f}")
-    print(f"top_tokens:       {TOP_TOKENS}")
+    print(f"top_tokens:       {effective_top_tokens(len(task.cipher_ids))}")
     print(f"anchors:          {ANCHORS}")
     print(f"rounds:           {effective_rounds(len(task.cipher_ids))}")
 
