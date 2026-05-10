@@ -108,6 +108,7 @@ STRING_LEXICON_MAX_CONTEXTS = 768
 STRING_LEXICON_MIN_GAIN_PER_BYTE = 0.050
 STRING_LEXICON_MAX_ACCEPTED = 2
 STRING_LEXICON_ALLOW_EMPTY_SPLITS = False
+STRING_LEXICON_FORMAT_ONLY = True
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -1295,6 +1296,10 @@ def string_lexicon_repair(
             cand_right = combo[split:]
             if cand_left == left_piece and cand_right == right_piece:
                 continue
+            if STRING_LEXICON_FORMAT_ONLY:
+                labels = (classify_piece(cand_left), classify_piece(cand_right))
+                if any(label in {"alnum", "empty", "replacement"} for label in labels):
+                    continue
             gain, scored_bytes = score_pair_overrides(a, b, cand_left, cand_right)
             if scored_bytes <= 0:
                 continue
