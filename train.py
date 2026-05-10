@@ -71,6 +71,13 @@ BIGRAM_REFINE_SKIP_WEIGHT = 0.4
 BIGRAM_REFINE_SKIP_MIN_TOKENS = 1_000_000
 BIGRAM_REFINE_SKIP_MAX_TOKENS = 1_000_000
 BIGRAM_REFINE_ALPHA = 0.05
+LCB_EXTRA_BIGRAM_PASS = True
+LCB_EXTRA_BIGRAM_MAX_TOKENS = 100_000
+LCB_EXTRA_BIGRAM_SHARDS = 5
+LCB_EXTRA_BIGRAM_LAMBDA = 1.0
+LCB_EXTRA_BIGRAM_MIN_DELTA = 0.25
+LCB_EXTRA_BIGRAM_MIN_SHARD_POSITIVE = 3
+LCB_EXTRA_BIGRAM_SKIP_FLOOR = -0.10
 BIGRAM_UNIGRAM_BACKOFF = True
 BIGRAM_UNIGRAM_BACKOFF_TAU = 1000.0
 BIGRAM_UNIGRAM_BACKOFF_MAX_TOKENS = 100_000
@@ -404,6 +411,108 @@ def bigram_swap_delta(c_big: np.ndarray, p_log: np.ndarray, perm: np.ndarray, a:
     return new - old
 
 
+def bigram_swap_directional_deltas(
+    c_big: np.ndarray, p_log: np.ndarray, perm: np.ndarray, a: int, b: int
+) -> tuple[float, float]:
+    pa = int(perm[a])
+    pb = int(perm[b])
+    old_out = float(c_big[a, :] @ p_log[pa, perm]) + float(c_big[b, :] @ p_log[pb, perm])
+    old_in = float(c_big[:, a] @ p_log[perm, pa]) + float(c_big[:, b] @ p_log[perm, pb])
+    new_perm = perm.copy()
+    new_perm[a], new_perm[b] = new_perm[b], new_perm[a]
+    new_out = float(c_big[a, :] @ p_log[pb, new_perm]) + float(c_big[b, :] @ p_log[pa, new_perm])
+    new_in = float(c_big[:, a] @ p_log[new_perm, pb]) + float(c_big[:, b] @ p_log[new_perm, pa])
+    return new_out - old_out, new_in - old_in
+
+
+def log_probs_from_bigram_counts(p_big: np.ndarray, alpha: float = BIGRAM_REFINE_ALPHA) -> np.ndarray:
+    k = p_big.shape[0]
+    return np.log((p_big + alpha) / (p_big.sum(axis=1, keepdims=True) + alpha * k)).astype(np.float32)
+
+
+def lcb_extra_bigram_pass(
+    cipher_ids: np.ndarray,
+    ref_ids: np.ndarray,
+    c_nodes: np.ndarray,
+    p_nodes: np.ndarray,
+    proposals: list[tuple[int, int]],
+    perm: np.ndarray,
+    owner: np.ndarray,
+    c_big: np.ndarray,
+    p_log: np.ndarray,
+    vocab_floor: int,
+    target_vocab_size: int,
+) -> tuple[int, list[float]]:
+    if not LCB_EXTRA_BIGRAM_PASS or len(cipher_ids) > LCB_EXTRA_BIGRAM_MAX_TOKENS:
+        return 0, []
+
+    c_skip = dense_bigram_counts(cipher_ids, c_nodes, vocab_floor, offset=2)
+    p_skip_log = log_probs_from_bigram_counts(dense_bigram_counts(ref_ids, p_nodes, target_vocab_size, offset=2))
+    shard_bigs: list[np.ndarray] = []
+    shard_count = max(1, LCB_EXTRA_BIGRAM_SHARDS)
+    shard_len = max(2, len(cipher_ids) // shard_count)
+    for shard_idx in range(shard_count):
+        start = shard_idx * shard_len
+        stop = len(cipher_ids) if shard_idx == shard_count - 1 else min(len(cipher_ids), (shard_idx + 1) * shard_len)
+        if stop - start < 4:
+            continue
+        shard_bigs.append(dense_bigram_counts(cipher_ids[start:stop], c_nodes, vocab_floor))
+    if not shard_bigs:
+        return 0, []
+
+    accepted = 0
+    accepted_lcbs: list[float] = []
+    checked = 0
+    full_positive = 0
+    directional_positive = 0
+    shard_positive = 0
+    for i, p_idx in proposals:
+        j = int(owner[p_idx])
+        if i == j:
+            continue
+        checked += 1
+        full_delta = bigram_swap_delta(c_big, p_log, perm, i, j)
+        if full_delta <= LCB_EXTRA_BIGRAM_MIN_DELTA:
+            continue
+        full_positive += 1
+        out_delta, in_delta = bigram_swap_directional_deltas(c_big, p_log, perm, i, j)
+        if out_delta <= 0.0 or in_delta <= 0.0:
+            continue
+        directional_positive += 1
+        skip_delta = bigram_swap_delta(c_skip, p_skip_log, perm, i, j)
+        if skip_delta < LCB_EXTRA_BIGRAM_SKIP_FLOOR * full_delta:
+            continue
+        shard_deltas = np.asarray([bigram_swap_delta(shard, p_log, perm, i, j) for shard in shard_bigs], dtype=np.float32)
+        positive_shards = int(np.count_nonzero(shard_deltas > 0.0))
+        if positive_shards < min(LCB_EXTRA_BIGRAM_MIN_SHARD_POSITIVE, len(shard_deltas)):
+            continue
+        median = float(np.median(shard_deltas))
+        mad = float(np.median(np.abs(shard_deltas - median)))
+        lcb = median - LCB_EXTRA_BIGRAM_LAMBDA * mad
+        if lcb <= 0.0:
+            continue
+        shard_positive += 1
+        accepted_lcbs.append(lcb)
+        pi = int(perm[i])
+        pj = int(perm[j])
+        perm[i], perm[j] = perm[j], perm[i]
+        owner[pi], owner[pj] = owner[pj], owner[pi]
+        accepted += 1
+
+    print(
+        f"lcb_extra_bigram_checked={checked} full_positive={full_positive} "
+        f"directional_positive={directional_positive} shard_positive={shard_positive}",
+        flush=True,
+    )
+    print(f"lcb_extra_bigram_swaps={accepted}", flush=True)
+    if accepted_lcbs:
+        arr = np.asarray(accepted_lcbs, dtype=np.float32)
+        print(f"lcb_extra_bigram_lcb_median={float(np.median(arr)):.6f}", flush=True)
+        print(f"lcb_extra_bigram_lcb_p10={float(np.percentile(arr, 10)):.6f}", flush=True)
+        print(f"lcb_extra_bigram_lcb_p90={float(np.percentile(arr, 90)):.6f}", flush=True)
+    return accepted, accepted_lcbs
+
+
 def refine_with_bigram_objective(
     cipher_ids: np.ndarray,
     ref_ids: np.ndarray,
@@ -510,6 +619,24 @@ def refine_with_bigram_objective(
         if pass_swaps == 0:
             break
 
+    extra_swaps = 0
+    extra_lcbs: list[float] = []
+    if passes_run == pass_budget:
+        extra_swaps, extra_lcbs = lcb_extra_bigram_pass(
+            cipher_ids,
+            ref_ids,
+            c_nodes,
+            p_nodes,
+            proposals,
+            perm,
+            owner,
+            c_big,
+            p_log,
+            len(mapping),
+            target_vocab_size,
+        )
+        swaps += extra_swaps
+
     if swaps:
         refined = mapping.copy()
         refined[c_nodes] = p_nodes[perm]
@@ -521,6 +648,7 @@ def refine_with_bigram_objective(
     print(f"bigram_refine_pass_budget={pass_budget}", flush=True)
     print(f"bigram_refine_passes={passes_run}", flush=True)
     print(f"bigram_refine_swaps={swaps}", flush=True)
+    print(f"bigram_refine_lcb_extra_swaps={extra_swaps}", flush=True)
     if accepted_deltas:
         delta_arr = np.asarray(accepted_deltas, dtype=np.float32)
         print(f"bigram_refine_delta_median={float(np.median(delta_arr)):.6f}", flush=True)
