@@ -109,3 +109,5 @@ ad25bf4	qwen36-o200k-100k-screen	0.468580	0.468580	2.743575	6.3	discard	final-on
 cff784e	qwen36-o200k-1m-screen	0.300500	0.300500	2.785068	6.3	discard	first-order edge regularization blocked useful swaps and worsened hard 1m screen
 cff784e	qwen36-o200k-100k-screen	0.489720	0.489720	2.762881	6.3	discard	first-order edge regularization badly underfit low-data hard screen
 3bdb91c	qwen36-o200k-100k-screen	0.476540	0.476540	2.743618	6.3	discard	unigram-backoff smoothing tau 100 worsened hard low-data screen
+995725a	qwen36-o200k-100k-tokenizer-prior-audit	0.457720	0.457720	2.727394	6.3	discard	unigram tokenizer prior aligns globally with oracle but has unusable move precision; proxy BPE boundary prior anti-aligns
+995725a	qwen36-o200k-100k-recurrence-proposal-audit	0.729020	0.729020	3.073255	6.3	discard	synthetic recurrence neural proposal underperforms graph rank badly; graph top100 precision 0.70 vs neural 0.08
