@@ -136,6 +136,11 @@ SINKHORN_NODES = 2_048
 SINKHORN_ITERS = 20
 SINKHORN_TEMP = 0.08
 SINKHORN_WEIGHT = 0.25
+ORACLE_CANDIDATE_DIAGNOSTICS = True
+ORACLE_CANDIDATE_TOP_N = 4096
+ORACLE_CANDIDATE_KS = (1, 2, 5, 16, 64)
+
+LAST_FINAL_EDGES: list[tuple[float, int, int]] = []
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -927,6 +932,7 @@ def align_shuffled(
     ref_ids: np.ndarray,
     target_vocab_size: int,
 ) -> np.ndarray:
+    global LAST_FINAL_EDGES
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device: {device}", flush=True)
     candidate_window = effective_candidate_window(len(cipher_ids))
@@ -1012,6 +1018,8 @@ def align_shuffled(
 
         if len(cipher_ids) <= SINKHORN_MAX_TOKENS:
             edges = sinkhorn_reweight_edges(edges, c_focus)
+        if round_idx == rounds - 1:
+            LAST_FINAL_EDGES = list(edges)
         edges.sort(reverse=True)
         used_c: set[int] = set()
         used_p: set[int] = set()
@@ -1141,6 +1149,68 @@ def error_breakdown(original: str, recovered: str, max_chars: int = 50_000) -> d
             label = classify(dest_char)
         counts_by_class[label] += 1
     return counts_by_class
+
+
+def oracle_candidate_diagnostics(task, mapping: np.ndarray) -> dict[str, float]:
+    if not ORACLE_CANDIDATE_DIAGNOSTICS or not LAST_FINAL_EDGES:
+        return {}
+    c_counts = counts(task.cipher_ids, int(max(len(mapping), int(task.cipher_ids.max(initial=0)) + 1)))
+    focus = np.argsort(-c_counts)[:ORACLE_CANDIDATE_TOP_N]
+
+    cipher_to_source: dict[int, int] = {}
+    for cipher, source in zip(task.cipher_ids, task.secret_ids):
+        c_int = int(cipher)
+        if c_int not in cipher_to_source:
+            cipher_to_source[c_int] = int(source)
+
+    candidates_by_c: dict[int, list[int]] = {}
+    for score, c, p in sorted(LAST_FINAL_EDGES, reverse=True):
+        bucket = candidates_by_c.setdefault(int(c), [])
+        if len(bucket) >= max(ORACLE_CANDIDATE_KS):
+            continue
+        if int(p) not in bucket:
+            bucket.append(int(p))
+
+    total_weight = 0.0
+    single_weight = 0.0
+    mapped_weight = 0.0
+    topk_weight = {k: 0.0 for k in ORACLE_CANDIDATE_KS}
+    mean_emission_len_num = 0.0
+    for c in focus:
+        c_int = int(c)
+        source_id = cipher_to_source.get(c_int)
+        if source_id is None:
+            continue
+        weight = float(c_counts[c_int])
+        if weight <= 0:
+            continue
+        total_weight += weight
+        source_piece = task.source_adapter.decode([source_id])
+        target_piece = task.target_adapter.encode(source_piece)
+        mean_emission_len_num += weight * len(target_piece)
+        if len(target_piece) != 1:
+            continue
+        single_weight += weight
+        oracle_p = int(target_piece[0])
+        cand = candidates_by_c.get(c_int, [])
+        if int(mapping[c_int]) == oracle_p:
+            mapped_weight += weight
+        for k in ORACLE_CANDIDATE_KS:
+            if oracle_p in cand[:k]:
+                topk_weight[k] += weight
+
+    if total_weight <= 0.0:
+        return {}
+    metrics: dict[str, float] = {
+        "oracle_focus_mass": total_weight / max(1.0, float(len(task.cipher_ids))),
+        "oracle_single_token_mass": single_weight / total_weight,
+        "oracle_mean_target_emission_len": mean_emission_len_num / total_weight,
+        "oracle_current_mapping_top1": mapped_weight / max(1.0, single_weight),
+    }
+    for k in ORACLE_CANDIDATE_KS:
+        metrics[f"oracle_edge_top{k}"] = topk_weight[k] / max(1.0, single_weight)
+    print(f"oracle_candidate_diagnostics: {json.dumps(metrics, sort_keys=True)}", flush=True)
+    return metrics
 
 
 def variable_emission_repair(
@@ -1842,6 +1912,8 @@ def main() -> None:
         original_sample = task.source_adapter.decode(task.secret_ids[:SAMPLE_TOKENS].astype(int).tolist())
         diagnostics = error_breakdown(original_sample, recovered_sample)
         print(f"error_breakdown: {json.dumps(diagnostics, sort_keys=True)}", flush=True)
+        oracle_metrics = oracle_candidate_diagnostics(task, mapping)
+        diagnostics.update({k: int(v * 1_000_000) for k, v in oracle_metrics.items()})
 
     out_dir = CACHE_DIR / "runs"
     out_dir.mkdir(parents=True, exist_ok=True)
