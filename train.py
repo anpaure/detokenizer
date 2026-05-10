@@ -46,6 +46,29 @@ RETOK_MOVE_AUDIT_TOPK = int(os.environ.get("DETOK_RETOK_MOVE_AUDIT_TOPK", "16"))
 RETOK_WINDOW_RADIUS = int(os.environ.get("DETOK_RETOK_WINDOW_RADIUS", "12"))
 RETOK_MAX_OCCURRENCES = int(os.environ.get("DETOK_RETOK_MAX_OCCURRENCES", "256"))
 RETOK_MOVE_AUDIT_MAX_WINDOWS = int(os.environ.get("DETOK_RETOK_MOVE_AUDIT_MAX_WINDOWS", "200000"))
+RETOK_BATCH_AUDIT = os.environ.get("DETOK_RETOK_BATCH_AUDIT", "0") == "1"
+RETOK_BATCH_TYPES = int(os.environ.get("DETOK_RETOK_BATCH_TYPES", "2048"))
+RETOK_BATCH_TOPK = int(os.environ.get("DETOK_RETOK_BATCH_TOPK", "16"))
+RETOK_BATCH_REPEATS = int(os.environ.get("DETOK_RETOK_BATCH_REPEATS", "8"))
+RETOK_BATCH_SIZES = tuple(int(x) for x in os.environ.get("DETOK_RETOK_BATCH_SIZES", "8,16,32,64,128").split(",") if x)
+RETOK_BATCH_GOOD_FRACTIONS = tuple(
+    float(x) for x in os.environ.get("DETOK_RETOK_BATCH_GOOD_FRACTIONS", "0,0.1,0.25,0.5,0.75,1").split(",") if x
+)
+RETOK_CEM_SEARCH = os.environ.get("DETOK_RETOK_CEM_SEARCH", "0") == "1"
+RETOK_CEM_TYPES = int(os.environ.get("DETOK_RETOK_CEM_TYPES", "1024"))
+RETOK_CEM_TOPK = int(os.environ.get("DETOK_RETOK_CEM_TOPK", "16"))
+RETOK_CEM_MOVE_POOL = int(os.environ.get("DETOK_RETOK_CEM_MOVE_POOL", "512"))
+RETOK_CEM_PRIOR_MAX_WINDOWS = int(os.environ.get("DETOK_RETOK_CEM_PRIOR_MAX_WINDOWS", "250000"))
+RETOK_CEM_PRIOR_MAX_OCC = int(os.environ.get("DETOK_RETOK_CEM_PRIOR_MAX_OCC", "64"))
+RETOK_CEM_SAMPLES = int(os.environ.get("DETOK_RETOK_CEM_SAMPLES", "64"))
+RETOK_CEM_ROUNDS = int(os.environ.get("DETOK_RETOK_CEM_ROUNDS", "8"))
+RETOK_CEM_ELITE_FRAC = float(os.environ.get("DETOK_RETOK_CEM_ELITE_FRAC", "0.10"))
+RETOK_CEM_BATCH_MOVES = int(os.environ.get("DETOK_RETOK_CEM_BATCH_MOVES", "32"))
+RETOK_CEM_UPDATE_RATE = float(os.environ.get("DETOK_RETOK_CEM_UPDATE_RATE", "0.70"))
+RETOK_CEM_ENTROPY_FLOOR = float(os.environ.get("DETOK_RETOK_CEM_ENTROPY_FLOOR", "0.02"))
+RETOK_CEM_GRAPH_RANK_PENALTY = float(os.environ.get("DETOK_RETOK_CEM_GRAPH_RANK_PENALTY", "0.0005"))
+RETOK_CEM_DUP_PENALTY = float(os.environ.get("DETOK_RETOK_CEM_DUP_PENALTY", "0.0"))
+RETOK_CEM_LEN_PENALTY = float(os.environ.get("DETOK_RETOK_CEM_LEN_PENALTY", "0.01"))
 
 TOP_TOKENS = 50_000
 ANCHORS = 8_192
@@ -1230,6 +1253,27 @@ def decode_with_singleton_overrides(
     return target_adapter.decode(out)
 
 
+def token_ids_with_singleton_overrides(
+    cipher_ids: np.ndarray,
+    mapping: np.ndarray,
+    emissions: dict[int, tuple[int, ...]],
+    overrides: dict[int, int],
+) -> list[int]:
+    out: list[int] = []
+    for c in cipher_ids:
+        c_int = int(c)
+        override = overrides.get(c_int)
+        if override is not None:
+            out.append(int(override))
+            continue
+        emission = emissions.get(c_int)
+        if emission is None:
+            out.append(int(mapping[c_int]))
+        else:
+            out.extend(int(p) for p in emission)
+    return out
+
+
 def graph_candidate_pool(edges: list[tuple[float, int, int]], per_token: int = 64) -> dict[int, set[int]]:
     pool: dict[int, set[int]] = {}
     for _score, c, p in edges:
@@ -1610,6 +1654,497 @@ def retokenized_objective_audit(
     }
 
 
+def sample_unique_moves(
+    moves: list[tuple[int, int]],
+    n: int,
+    rng: np.random.Generator,
+    used_c: set[int],
+    used_p: set[int],
+) -> list[tuple[int, int]]:
+    if n <= 0:
+        return []
+    order = rng.permutation(len(moves))
+    chosen: list[tuple[int, int]] = []
+    for idx in order:
+        c, p = moves[int(idx)]
+        if c in used_c or p in used_p:
+            continue
+        chosen.append((c, p))
+        used_c.add(c)
+        used_p.add(p)
+        if len(chosen) >= n:
+            break
+    return chosen
+
+
+def pearson_corr(xs: list[float], ys: list[float]) -> float:
+    if len(xs) < 2 or len(xs) != len(ys):
+        return 0.0
+    x = np.asarray(xs, dtype=np.float64)
+    y = np.asarray(ys, dtype=np.float64)
+    x -= float(x.mean())
+    y -= float(y.mean())
+    denom = float(np.sqrt((x * x).sum() * (y * y).sum()))
+    if denom <= 0.0:
+        return 0.0
+    return float((x * y).sum() / denom)
+
+
+def retok_batch_signal_audit(
+    task,
+    mapping: np.ndarray,
+    emissions: dict[int, tuple[int, ...]],
+) -> dict[str, object]:
+    focus = [int(c) for c in LAST_C_FOCUS[: min(RETOK_BATCH_TYPES, len(LAST_C_FOCUS))]]
+    if not focus:
+        return {}
+    inv = inverse_permutation(task.perm)
+    truth: dict[int, int] = {}
+    for c in focus:
+        true_p, _piece, _cls = singleton_truth_for_cipher(task, int(c), inv)
+        if true_p is not None:
+            truth[int(c)] = int(true_p)
+
+    graph_scores = graph_score_pool(LAST_FINAL_EDGES, TORCH_TOPK)
+    good_moves: list[tuple[int, int]] = []
+    bad_moves: list[tuple[int, int]] = []
+    for c in focus:
+        true_p = truth.get(c)
+        if true_p is None:
+            continue
+        current_p = int(mapping[c])
+        for p, _score in graph_scores.get(c, [])[:RETOK_BATCH_TOPK]:
+            p_int = int(p)
+            if p_int == current_p:
+                continue
+            if p_int == true_p:
+                good_moves.append((c, p_int))
+            else:
+                bad_moves.append((c, p_int))
+    if not good_moves or not bad_moves:
+        return {}
+
+    sample_cipher = task.cipher_ids[:SAMPLE_TOKENS]
+    baseline_text = decode_with_variable_emissions(sample_cipher, mapping, emissions, task.target_adapter)
+    baseline_metrics = evaluate_recovery(task, baseline_text, SAMPLE_TOKENS)
+    baseline_cer = float(baseline_metrics["cer50k"])
+    lm = SparseTokenBigramLM(task.ref_ids, task.target_adapter.spec.vocab_size)
+    baseline_retok = task.target_adapter.encode(baseline_text)
+    baseline_retok_score = lm.score_ids(baseline_retok)
+    baseline_assigned_score = lm.score_ids(token_ids_with_singleton_overrides(sample_cipher, mapping, emissions, {}))
+    baseline_bpb = task.byte_lm.bits_per_byte(baseline_text.encode("utf-8", errors="replace"))
+    baseline_chars = len(baseline_text)
+
+    owner_of_target: dict[int, int] = {}
+    for c in focus:
+        p = int(mapping[c])
+        if p not in owner_of_target:
+            owner_of_target[p] = c
+
+    rng = np.random.default_rng(SEED + 991)
+    rows: list[dict[str, float | int]] = []
+    for batch_size in RETOK_BATCH_SIZES:
+        if batch_size <= 0:
+            continue
+        for requested_fraction in RETOK_BATCH_GOOD_FRACTIONS:
+            target_good = int(round(batch_size * requested_fraction))
+            target_good = min(target_good, batch_size)
+            for _ in range(RETOK_BATCH_REPEATS):
+                used_c: set[int] = set()
+                used_p: set[int] = set()
+                chosen_good = sample_unique_moves(good_moves, target_good, rng, used_c, used_p)
+                chosen_bad = sample_unique_moves(bad_moves, batch_size - len(chosen_good), rng, used_c, used_p)
+                if len(chosen_good) + len(chosen_bad) == 0:
+                    continue
+                moves = chosen_good + chosen_bad
+                overrides = {c: p for c, p in moves}
+                text = decode_with_singleton_overrides(sample_cipher, mapping, emissions, overrides, task.target_adapter)
+                retok_ids = task.target_adapter.encode(text)
+                retok_score = lm.score_ids(retok_ids)
+                assigned_score = lm.score_ids(token_ids_with_singleton_overrides(sample_cipher, mapping, emissions, overrides))
+                metrics = evaluate_recovery(task, text, SAMPLE_TOKENS)
+                bpb = task.byte_lm.bits_per_byte(text.encode("utf-8", errors="replace"))
+                conflicts = sum(
+                    1
+                    for c, p in overrides.items()
+                    if owner_of_target.get(int(p), int(c)) != int(c)
+                )
+                actual_good_fraction = len(chosen_good) / max(1, len(moves))
+                rows.append(
+                    {
+                        "batch_size": int(batch_size),
+                        "requested_good_fraction": float(requested_fraction),
+                        "actual_good_fraction": float(actual_good_fraction),
+                        "moves": int(len(moves)),
+                        "target_conflicts": int(conflicts),
+                        "length_delta": int(len(text) - baseline_chars),
+                        "retok_backoff_nll_delta": float(
+                            baseline_retok_score["backoff_nll"] - retok_score["backoff_nll"]
+                        ),
+                        "retok_bigram_nll_delta": float(
+                            baseline_retok_score["bigram_nll"] - retok_score["bigram_nll"]
+                        ),
+                        "retok_backoff_delta": float(retok_score["backoff"] - baseline_retok_score["backoff"]),
+                        "retok_bigram_delta": float(retok_score["bigram"] - baseline_retok_score["bigram"]),
+                        "assigned_bigram_delta": float(assigned_score["bigram"] - baseline_assigned_score["bigram"]),
+                        "byte_bpb_delta": float(baseline_bpb - bpb),
+                        "oracle_cer_delta": float(baseline_cer - float(metrics["cer50k"])),
+                    }
+                )
+
+    if not rows:
+        return {}
+    retok_scores = [float(row["retok_backoff_nll_delta"]) for row in rows]
+    cer_deltas = [float(row["oracle_cer_delta"]) for row in rows]
+    good_fracs = [float(row["actual_good_fraction"]) for row in rows]
+    high_good_labels = [1 if frac >= 0.5 else 0 for frac in good_fracs]
+    order = np.argsort(-np.asarray(retok_scores, dtype=np.float64))
+    top_decile_n = max(1, int(np.ceil(0.10 * len(order))))
+    top_decile = order[:top_decile_n]
+    top_decile_good_fraction = float(np.asarray(good_fracs, dtype=np.float64)[top_decile].mean())
+    best_idx = int(order[0])
+    by_cell: dict[tuple[int, float], list[dict[str, float | int]]] = {}
+    for row in rows:
+        by_cell.setdefault((int(row["batch_size"]), float(row["requested_good_fraction"])), []).append(row)
+    cell_rows: list[dict[str, float | int]] = []
+    for (batch_size, frac), cell in sorted(by_cell.items()):
+        cell_rows.append(
+            {
+                "batch_size": batch_size,
+                "requested_good_fraction": frac,
+                "n": len(cell),
+                "actual_good_fraction": float(np.mean([float(r["actual_good_fraction"]) for r in cell])),
+                "retok_backoff_nll_delta": float(np.mean([float(r["retok_backoff_nll_delta"]) for r in cell])),
+                "oracle_cer_delta": float(np.mean([float(r["oracle_cer_delta"]) for r in cell])),
+                "byte_bpb_delta": float(np.mean([float(r["byte_bpb_delta"]) for r in cell])),
+                "target_conflicts": float(np.mean([float(r["target_conflicts"]) for r in cell])),
+            }
+        )
+
+    summary = {
+        "samples": len(rows),
+        "good_moves": len(good_moves),
+        "bad_moves": len(bad_moves),
+        "baseline_cer50k": baseline_cer,
+        "baseline_retok_backoff_nll": float(baseline_retok_score["backoff_nll"]),
+        "pearson_retok_vs_cer_delta": pearson_corr(retok_scores, cer_deltas),
+        "auc_high_good_fraction": auc_from_scores(high_good_labels, retok_scores),
+        "top_decile_good_fraction": top_decile_good_fraction,
+        "best_by_retok": rows[best_idx],
+        "cells": cell_rows,
+    }
+    print("retok_batch_signal_summary:", json.dumps({k: v for k, v in summary.items() if k != "cells"}, sort_keys=True), flush=True)
+    print("retok_batch_signal_cells:", flush=True)
+    for row in cell_rows:
+        print(
+            f"  size={row['batch_size']} good={row['requested_good_fraction']:.2f} n={row['n']} "
+            f"actual_good={row['actual_good_fraction']:.3f} "
+            f"retok_nll_delta={row['retok_backoff_nll_delta']:.6f} "
+            f"cer_delta={row['oracle_cer_delta']:.6f} bpb_delta={row['byte_bpb_delta']:.6f} "
+            f"conflicts={row['target_conflicts']:.1f}",
+            flush=True,
+        )
+    return summary
+
+
+def build_cem_candidate_moves(mapping: np.ndarray) -> list[dict[str, float | int]]:
+    focus = [int(c) for c in LAST_C_FOCUS[: min(RETOK_CEM_TYPES, len(LAST_C_FOCUS))]]
+    graph_scores = graph_score_pool(LAST_FINAL_EDGES, TORCH_TOPK)
+    current_graph_score = {c: {p: score for p, score in candidates} for c, candidates in graph_scores.items()}
+    moves: list[dict[str, float | int]] = []
+    for c in focus:
+        current_p = int(mapping[c])
+        for rank, (p, score) in enumerate(graph_scores.get(c, [])[:RETOK_CEM_TOPK], start=1):
+            p_int = int(p)
+            if p_int == current_p:
+                continue
+            moves.append(
+                {
+                    "c": int(c),
+                    "p": p_int,
+                    "rank": int(rank),
+                    "graph_delta": float(score - current_graph_score.get(c, {}).get(current_p, 0.0)),
+                    "prior_score": 0.0,
+                }
+            )
+    return moves
+
+
+def score_cem_move_priors(
+    task,
+    mapping: np.ndarray,
+    emissions: dict[int, tuple[int, ...]],
+    moves: list[dict[str, float | int]],
+    lm: SparseTokenBigramLM,
+) -> None:
+    if not moves:
+        return
+    sample_cipher = task.cipher_ids[:SAMPLE_TOKENS]
+    focus = {int(move["c"]) for move in moves}
+    positions_by_c: dict[int, list[int]] = {c: [] for c in focus}
+    for pos, c in enumerate(sample_cipher):
+        c_int = int(c)
+        if c_int in positions_by_c:
+            positions_by_c[c_int].append(pos)
+    per_move_occ = max(1, min(RETOK_CEM_PRIOR_MAX_OCC, RETOK_CEM_PRIOR_MAX_WINDOWS // max(1, len(moves))))
+    current_piece_cache: dict[int, str] = {}
+    target_piece_cache: dict[int, str] = {}
+    for move in moves:
+        c = int(move["c"])
+        p = int(move["p"])
+        positions = positions_by_c.get(c, [])
+        if not positions:
+            move["prior_score"] = -999.0
+            continue
+        sampled_positions = choose_occurrence_sample(positions, per_move_occ)
+        candidate_piece = target_piece(p, task.target_adapter, target_piece_cache)
+        old_texts: list[str] = []
+        new_texts: list[str] = []
+        for pos in sampled_positions:
+            start = max(0, pos - RETOK_WINDOW_RADIUS)
+            stop = min(len(sample_cipher), pos + RETOK_WINDOW_RADIUS + 1)
+            old_parts: list[str] = []
+            new_parts: list[str] = []
+            for j in range(start, stop):
+                c_j = int(sample_cipher[j])
+                old_piece = current_piece_for_cipher(c_j, mapping, emissions, task.target_adapter, current_piece_cache)
+                old_parts.append(old_piece)
+                new_parts.append(candidate_piece if j == pos else old_piece)
+            old_texts.append("".join(old_parts))
+            new_texts.append("".join(new_parts))
+        old_ids_batch = task.target_adapter.encode_batch(old_texts)
+        new_ids_batch = task.target_adapter.encode_batch(new_texts)
+        nll_deltas: list[float] = []
+        for old_ids, new_ids in zip(old_ids_batch, new_ids_batch):
+            old_score = lm.score_ids(old_ids)
+            new_score = lm.score_ids(new_ids)
+            nll_deltas.append(float(old_score["backoff_nll"] - new_score["backoff_nll"]))
+        move["prior_score"] = float(np.median(np.asarray(nll_deltas, dtype=np.float64)))
+
+
+def sample_weighted_cem_batch(
+    pool: list[dict[str, float | int]],
+    weights: np.ndarray,
+    rng: np.random.Generator,
+    batch_moves: int,
+) -> list[dict[str, float | int]]:
+    if not pool or batch_moves <= 0:
+        return []
+    probs = weights / max(float(weights.sum()), 1.0e-30)
+    order = rng.choice(len(pool), size=len(pool), replace=False, p=probs)
+    used_c: set[int] = set()
+    used_p: set[int] = set()
+    chosen: list[dict[str, float | int]] = []
+    for idx in order:
+        move = pool[int(idx)]
+        c = int(move["c"])
+        p = int(move["p"])
+        if c in used_c or p in used_p:
+            continue
+        chosen.append(move)
+        used_c.add(c)
+        used_p.add(p)
+        if len(chosen) >= batch_moves:
+            break
+    return chosen
+
+
+def score_cem_overrides(
+    task,
+    sample_cipher: np.ndarray,
+    mapping: np.ndarray,
+    emissions: dict[int, tuple[int, ...]],
+    lm: SparseTokenBigramLM,
+    baseline_chars: int,
+    owner_of_target: dict[int, int],
+    overrides: dict[int, int],
+) -> tuple[float, dict[str, float | int]]:
+    text = decode_with_singleton_overrides(sample_cipher, mapping, emissions, overrides, task.target_adapter)
+    retok_ids = task.target_adapter.encode(text)
+    retok_score = lm.score_ids(retok_ids)
+    conflicts = sum(
+        1
+        for c, p in overrides.items()
+        if owner_of_target.get(int(p), int(c)) != int(c)
+    )
+    length_delta = len(text) - baseline_chars
+    avg_rank = 0.0
+    if overrides:
+        # Rank is filled by the caller through the override move list.
+        avg_rank = 0.0
+    objective = float(retok_score["backoff_nll"])
+    objective += RETOK_CEM_DUP_PENALTY * (conflicts / max(1, len(overrides)))
+    objective += RETOK_CEM_LEN_PENALTY * (abs(length_delta) / max(1, baseline_chars))
+    details = {
+        "objective": objective,
+        "retok_backoff_nll": float(retok_score["backoff_nll"]),
+        "retok_bigram_nll": float(retok_score["bigram_nll"]),
+        "retok_tokens": int(len(retok_ids)),
+        "target_conflicts": int(conflicts),
+        "length_delta": int(length_delta),
+        "moves": int(len(overrides)),
+        "avg_rank": float(avg_rank),
+    }
+    return objective, details
+
+
+def retok_cem_search(
+    task,
+    mapping: np.ndarray,
+    emissions: dict[int, tuple[int, ...]],
+) -> tuple[np.ndarray, dict[int, tuple[int, ...]], dict[str, object]]:
+    sample_cipher = task.cipher_ids[:SAMPLE_TOKENS]
+    baseline_text = decode_with_variable_emissions(sample_cipher, mapping, emissions, task.target_adapter)
+    baseline_metrics = evaluate_recovery(task, baseline_text, SAMPLE_TOKENS)
+    baseline_chars = len(baseline_text)
+    lm = SparseTokenBigramLM(task.ref_ids, task.target_adapter.spec.vocab_size)
+    baseline_objective, baseline_details = score_cem_overrides(
+        task,
+        sample_cipher,
+        mapping,
+        emissions,
+        lm,
+        baseline_chars,
+        {},
+        {},
+    )
+    moves = build_cem_candidate_moves(mapping)
+    score_cem_move_priors(task, mapping, emissions, moves, lm)
+    moves.sort(key=lambda move: (float(move["prior_score"]), -int(move["rank"]), float(move["graph_delta"])), reverse=True)
+    pool = moves[: min(RETOK_CEM_MOVE_POOL, len(moves))]
+    if not pool:
+        return mapping, emissions, {}
+    prior_scores = np.asarray([float(move["prior_score"]) for move in pool], dtype=np.float64)
+    finite = np.isfinite(prior_scores)
+    if bool(finite.any()):
+        lo = float(np.percentile(prior_scores[finite], 5))
+        hi = float(np.percentile(prior_scores[finite], 95))
+        denom = max(hi - lo, 1.0e-9)
+        norm_prior = np.clip((prior_scores - lo) / denom, 0.0, 1.0)
+    else:
+        norm_prior = np.zeros(len(pool), dtype=np.float64)
+    rank_prior = np.asarray([1.0 / max(1.0, float(move["rank"])) for move in pool], dtype=np.float64)
+    weights = 0.75 * norm_prior + 0.25 * rank_prior + RETOK_CEM_ENTROPY_FLOOR
+    weights = weights.astype(np.float64)
+
+    owner_of_target: dict[int, int] = {}
+    for c in LAST_C_FOCUS[: min(RETOK_CEM_TYPES, len(LAST_C_FOCUS))]:
+        c_int = int(c)
+        p_int = int(mapping[c_int])
+        if p_int not in owner_of_target:
+            owner_of_target[p_int] = c_int
+
+    rng = np.random.default_rng(SEED + 4242)
+    best_overrides: dict[int, int] = {}
+    best_objective = baseline_objective
+    best_details = dict(baseline_details)
+    round_reports: list[dict[str, float | int]] = []
+    elite_n = max(1, int(round(RETOK_CEM_SAMPLES * RETOK_CEM_ELITE_FRAC)))
+
+    for round_idx in range(RETOK_CEM_ROUNDS):
+        samples: list[tuple[float, dict[int, int], list[int], dict[str, float | int]]] = []
+        for _ in range(RETOK_CEM_SAMPLES):
+            chosen = sample_weighted_cem_batch(pool, weights, rng, RETOK_CEM_BATCH_MOVES)
+            if not chosen:
+                continue
+            overrides = {int(move["c"]): int(move["p"]) for move in chosen}
+            objective, details = score_cem_overrides(
+                task,
+                sample_cipher,
+                mapping,
+                emissions,
+                lm,
+                baseline_chars,
+                owner_of_target,
+                overrides,
+            )
+            avg_rank = float(np.mean([float(move["rank"]) for move in chosen]))
+            objective += RETOK_CEM_GRAPH_RANK_PENALTY * (avg_rank / max(1.0, float(RETOK_CEM_TOPK)))
+            details["objective"] = objective
+            details["avg_rank"] = avg_rank
+            indices = [pool.index(move) for move in chosen]
+            samples.append((objective, overrides, indices, details))
+        if not samples:
+            break
+        samples.sort(key=lambda item: item[0])
+        elites = samples[:elite_n]
+        counts_elite = np.zeros(len(pool), dtype=np.float64)
+        for _objective, _overrides, indices, _details in elites:
+            counts_elite[indices] += 1.0
+        elite_weights = counts_elite + RETOK_CEM_ENTROPY_FLOOR
+        weights = (1.0 - RETOK_CEM_UPDATE_RATE) * weights + RETOK_CEM_UPDATE_RATE * elite_weights
+        if samples[0][0] < best_objective:
+            best_objective = float(samples[0][0])
+            best_overrides = dict(samples[0][1])
+            best_details = dict(samples[0][3])
+        round_reports.append(
+            {
+                "round": int(round_idx + 1),
+                "best_objective": float(samples[0][0]),
+                "elite_mean_objective": float(np.mean([item[0] for item in elites])),
+                "best_moves": int(samples[0][3]["moves"]),
+                "best_conflicts": int(samples[0][3]["target_conflicts"]),
+                "best_length_delta": int(samples[0][3]["length_delta"]),
+            }
+        )
+        print(
+            f"retok_cem_round={round_idx + 1} best_objective={samples[0][0]:.6f} "
+            f"elite_mean={round_reports[-1]['elite_mean_objective']:.6f} "
+            f"best_moves={samples[0][3]['moves']} conflicts={samples[0][3]['target_conflicts']} "
+            f"length_delta={samples[0][3]['length_delta']}",
+            flush=True,
+        )
+
+    report: dict[str, object] = {
+        "baseline_cer50k": float(baseline_metrics["cer50k"]),
+        "baseline_objective": float(baseline_objective),
+        "baseline_details": baseline_details,
+        "candidate_moves": len(moves),
+        "move_pool": len(pool),
+        "pool_prior_top": [
+            {
+                "c": int(move["c"]),
+                "p": int(move["p"]),
+                "rank": int(move["rank"]),
+                "prior_score": float(move["prior_score"]),
+            }
+            for move in pool[:10]
+        ],
+        "rounds": round_reports,
+        "best_objective": float(best_objective),
+        "best_details": best_details,
+        "accepted": bool(best_overrides),
+    }
+    if not best_overrides:
+        print("retok_cem_no_objective_improvement", flush=True)
+        return mapping, emissions, report
+
+    repaired = mapping.copy()
+    repaired_emissions = dict(emissions)
+    for c, p in best_overrides.items():
+        repaired[int(c)] = int(p)
+        repaired_emissions.pop(int(c), None)
+    repaired_text = decode_with_variable_emissions(sample_cipher, repaired, repaired_emissions, task.target_adapter)
+    repaired_metrics = evaluate_recovery(task, repaired_text, SAMPLE_TOKENS)
+    report["repaired_metrics"] = repaired_metrics
+    report["cer_delta"] = float(baseline_metrics["cer50k"] - repaired_metrics["cer50k"])
+    print(
+        "retok_cem_result:",
+        json.dumps(
+            {
+                "baseline_cer50k": float(baseline_metrics["cer50k"]),
+                "repaired_cer50k": float(repaired_metrics["cer50k"]),
+                "cer_delta": report["cer_delta"],
+                "moves": len(best_overrides),
+                "best_objective": best_objective,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+    return repaired, repaired_emissions, report
+
+
 def oracle_audit(task, mapping: np.ndarray, emissions: dict[int, tuple[int, ...]]) -> dict[str, object]:
     sample_cipher = task.cipher_ids[:SAMPLE_TOKENS]
     focus = LAST_C_FOCUS[: min(ORACLE_AUDIT_TYPES, len(LAST_C_FOCUS))]
@@ -1743,6 +2278,9 @@ def main() -> None:
 
     mapping = align_shuffled(task.cipher_ids, task.ref_ids, task.target_adapter.spec.vocab_size)
     emissions = variable_emission_repair(task.cipher_ids, task.ref_ids, mapping, task.target_adapter.spec.vocab_size)
+    cem_report: dict[str, object] = {}
+    if RETOK_CEM_SEARCH:
+        mapping, emissions, cem_report = retok_cem_search(task, mapping, emissions)
     recovered_sample = decode_with_variable_emissions(
         task.cipher_ids[:SAMPLE_TOKENS],
         mapping,
@@ -1761,6 +2299,9 @@ def main() -> None:
     retok_report: dict[str, object] = {}
     if RETOK_OBJECTIVE_AUDIT:
         retok_report = retokenized_objective_audit(task, mapping, emissions)
+    retok_batch_report: dict[str, object] = {}
+    if RETOK_BATCH_AUDIT:
+        retok_batch_report = retok_batch_signal_audit(task, mapping, emissions)
 
     out_dir = CACHE_DIR / "runs"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1785,8 +2326,10 @@ def main() -> None:
         "learn_skip_weight": LEARN_SKIP_WEIGHT,
         "variable_emission_repair": VARIABLE_EMISSION_REPAIR,
         "variable_emissions": len(emissions),
+        "retok_cem_search": cem_report,
         "oracle_audit": oracle_report,
         "retokenized_objective_audit": retok_report,
+        "retokenized_batch_audit": retok_batch_report,
         "diagnostics": diagnostics,
         "elapsed_seconds": time.time() - t0,
         "metrics": metrics,

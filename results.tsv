@@ -153,3 +153,5 @@ dfd85ab	qwen36-o200k-100k-screen	0.451680	0.451680	2.693335	6.3	discard	high-mar
 16a9052	qwen36-o200k-100k-oracle-audit	0.451460	0.451460	2.694996	6.3	diagnostic	union/graph top64 singleton oracle reaches 0.353360 CER, a 0.098100 gain; global candidate selection is the active bottleneck
 retok-audit	qwen36-o200k-100k-retok-objective-audit	0.451460	0.451460	2.694996	6.3	diagnostic	retokenized LM aligns with oracle mappings: graph_top64 oracle CER 0.353360 with backoff_nll 6.648255 versus baseline 6.666507
 retok-audit	qwen36-o200k-100k-retok-move-audit	0.451460	0.451460	2.694996	6.3	discard	retokenized window deltas have decent AUC but insufficient top precision: focused head audit best top100 precision 0.10 below 0.20 gate
+retok-batch	qwen36-o200k-100k-batch-signal-audit	0.451460	0.451460	2.694996	6.3	diagnostic	batch-level retok score is strongly informative: AUC 0.775802, corr with CER delta 0.888872, top-decile good fraction 0.972222
+retok-batch	qwen36-o200k-100k-cem-search	0.448660	0.448660	2.687478	6.3	discard	CEM batch search improved hard screen by 0.002800 but missed material gate of 0.446500, so no suite run
