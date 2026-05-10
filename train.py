@@ -97,6 +97,11 @@ VARIABLE_EMISSION_MIN_COUNT = 10
 VARIABLE_EMISSION_MIN_GAIN_PER_OCC = 5.00
 VARIABLE_EMISSION_MAX_ACCEPTED = 2
 VARIABLE_EMISSION_FREE_LOCAL_PAIRS = True
+CONSENSUS_FINAL_EDGES = os.environ.get("DETOK_CONSENSUS_FINAL_EDGES", "1") != "0"
+CONSENSUS_MAX_TOKENS = int(os.environ.get("DETOK_CONSENSUS_MAX_TOKENS", "100000"))
+CONSENSUS_AGREEMENT_BONUS = float(os.environ.get("DETOK_CONSENSUS_AGREEMENT_BONUS", "0.03"))
+CONSENSUS_BASE_WEIGHT = float(os.environ.get("DETOK_CONSENSUS_BASE_WEIGHT", "4.0"))
+CONSENSUS_VIEW_WEIGHT = float(os.environ.get("DETOK_CONSENSUS_VIEW_WEIGHT", "1.0"))
 
 LAST_FINAL_EDGES: list[tuple[float, int, int]] = []
 LAST_C_FOCUS: np.ndarray = np.empty(0, dtype=np.int64)
@@ -263,6 +268,37 @@ def topk_edges(
                     continue
                 edges.append((float(score), int(c), int(p_focus[int(col)])))
     return edges
+
+
+def consensus_edges(edge_views: list[list[tuple[float, int, int]]]) -> list[tuple[float, int, int]]:
+    if len(edge_views) <= 1:
+        return edge_views[0] if edge_views else []
+    totals: dict[tuple[int, int], float] = {}
+    appearances: dict[tuple[int, int], int] = {}
+    for view_idx, edges in enumerate(edge_views):
+        view_weight = CONSENSUS_BASE_WEIGHT if view_idx == 0 else CONSENSUS_VIEW_WEIGHT
+        rank_by_c: dict[int, int] = {}
+        for _score, c, p in edges:
+            c_int = int(c)
+            p_int = int(p)
+            rank = rank_by_c.get(c_int, 0)
+            rank_by_c[c_int] = rank + 1
+            key = (c_int, p_int)
+            totals[key] = totals.get(key, 0.0) + view_weight / float(rank + 1)
+            appearances[key] = appearances.get(key, 0) + 1
+
+    by_c: dict[int, list[tuple[float, int]]] = {}
+    for (c, p), score in totals.items():
+        score += CONSENSUS_AGREEMENT_BONUS * float(max(0, appearances[(c, p)] - 1))
+        by_c.setdefault(c, []).append((score, p))
+
+    out: list[tuple[float, int, int]] = []
+    for c, candidates in by_c.items():
+        candidates.sort(reverse=True)
+        for score, p in candidates[:TORCH_TOPK]:
+            out.append((float(score), int(c), int(p)))
+    out.sort(reverse=True)
+    return out
 
 
 def dense_bigram_counts(ids: np.ndarray, nodes: np.ndarray, vocab_floor: int, offset: int = 1) -> np.ndarray:
@@ -799,10 +835,7 @@ def align_shuffled(
                 p_parts.extend([p_left2, p_right2])
             c_vec = normalize_features(torch.cat(c_parts, dim=1), c_counts[c_focus], device)
             p_vec = normalize_features(torch.cat(p_parts, dim=1), p_counts[p_focus], device)
-            del c_parts, p_parts, c_left, c_right, p_left, p_right
-            if use_skip_context:
-                del c_left2, c_right2, p_left2, p_right2
-            edges = topk_edges(
+            base_edges = topk_edges(
                 c_vec,
                 p_vec,
                 c_focus,
@@ -814,7 +847,45 @@ def align_shuffled(
                 candidate_window,
                 device,
             )
-            del c_vec, p_vec
+            if (
+                CONSENSUS_FINAL_EDGES
+                and round_idx == rounds - 1
+                and len(cipher_ids) <= CONSENSUS_MAX_TOKENS
+            ):
+                edge_views = [base_edges]
+                view_specs = [
+                    ("adjacent", [c_left, c_right], [p_left, p_right]),
+                    ("left", [c_left], [p_left]),
+                    ("right", [c_right], [p_right]),
+                ]
+                if use_skip_context:
+                    view_specs.append(("skip", [c_left2, c_right2], [p_left2, p_right2]))
+                for view_name, c_view_parts, p_view_parts in view_specs:
+                    c_view = normalize_features(torch.cat(c_view_parts, dim=1), c_counts[c_focus], device)
+                    p_view = normalize_features(torch.cat(p_view_parts, dim=1), p_counts[p_focus], device)
+                    edge_views.append(
+                        topk_edges(
+                            c_view,
+                            p_view,
+                            c_focus,
+                            p_focus,
+                            c_log,
+                            p_log,
+                            mapping,
+                            p_rank,
+                            candidate_window,
+                            device,
+                        )
+                    )
+                    del c_view, p_view
+                    print(f"consensus_view={view_name} edges={len(edge_views[-1])}", flush=True)
+                edges = consensus_edges(edge_views)
+                print(f"consensus_final_edges views={len(edge_views)} edges={len(edges)}", flush=True)
+            else:
+                edges = base_edges
+            del c_parts, p_parts, c_left, c_right, p_left, p_right, c_vec, p_vec
+            if use_skip_context:
+                del c_left2, c_right2, p_left2, p_right2
             if device == "cuda":
                 torch.cuda.empty_cache()
 
