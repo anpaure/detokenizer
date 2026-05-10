@@ -47,6 +47,7 @@ TORCH_BATCH_SIZE = 256
 TORCH_CONTEXT_CHUNK = 5_000_000
 SKIP_CONTEXT_MIN_TOKENS = 1_000_000
 SKIP_CONTEXT_WEIGHT = 1.0
+THIRD_CONTEXT_WEIGHT = 0.5
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -188,17 +189,23 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
             if use_skip_context:
                 c_left2, c_right2 = torch_context_maps(cipher_ids, c_focus, c_anchors, device, offset=2)
                 p_left2, p_right2 = torch_context_maps(ref_ids, p_focus, p_anchors, device, offset=2)
+                c_left3, c_right3 = torch_context_maps(cipher_ids, c_focus, c_anchors, device, offset=3)
+                p_left3, p_right3 = torch_context_maps(ref_ids, p_focus, p_anchors, device, offset=3)
                 c_left2.mul_(SKIP_CONTEXT_WEIGHT)
                 c_right2.mul_(SKIP_CONTEXT_WEIGHT)
                 p_left2.mul_(SKIP_CONTEXT_WEIGHT)
                 p_right2.mul_(SKIP_CONTEXT_WEIGHT)
-                c_parts.extend([c_left2, c_right2])
-                p_parts.extend([p_left2, p_right2])
+                c_left3.mul_(THIRD_CONTEXT_WEIGHT)
+                c_right3.mul_(THIRD_CONTEXT_WEIGHT)
+                p_left3.mul_(THIRD_CONTEXT_WEIGHT)
+                p_right3.mul_(THIRD_CONTEXT_WEIGHT)
+                c_parts.extend([c_left2, c_right2, c_left3, c_right3])
+                p_parts.extend([p_left2, p_right2, p_left3, p_right3])
             c_vec = normalize_features(torch.cat(c_parts, dim=1), c_counts[c_focus], device)
             p_vec = normalize_features(torch.cat(p_parts, dim=1), p_counts[p_focus], device)
             del c_parts, p_parts, c_left, c_right, p_left, p_right
             if use_skip_context:
-                del c_left2, c_right2, p_left2, p_right2
+                del c_left2, c_right2, p_left2, p_right2, c_left3, c_right3, p_left3, p_right3
             edges = topk_edges(
                 c_vec,
                 p_vec,
@@ -266,6 +273,7 @@ def main() -> None:
         "torch_topk": TORCH_TOPK,
         "skip_context": len(task.cipher_ids) >= SKIP_CONTEXT_MIN_TOKENS,
         "skip_context_weight": SKIP_CONTEXT_WEIGHT,
+        "third_context_weight": THIRD_CONTEXT_WEIGHT,
         "elapsed_seconds": time.time() - t0,
         "metrics": metrics,
         "preview": recovered_sample[:1000],
