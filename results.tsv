@@ -157,3 +157,4 @@ fde19ae	qwen36-o200k-100k-screen	0.456080	0.456080	2.677547	124.0	discard	string
 de84781	qwen36-o200k-100k-screen	0.450860	0.450860	2.679816	122.9	diagnostic	non-empty string boundary shifts beat hard Qwen screen with two pair moves but need cross-tokenizer suite
 de84781	qwen-mistral-gemma-100k-screen	0.457500	0.464960	2.665664	118.3	discard	non-empty string boundary shifts improve Qwen but regress Mistral/Gemma enough to miss accepted 100k suite
 5e4485c	qwen-mistral-gemma-100k-screen	0.460133	0.465940	2.666824	101.0	discard	format-only string boundary gate preserves Qwen gain but badly overfits Mistral and Gemma
+24a71cb	qwen36-o200k-100k-screen	0.449500	0.449500	2.690143	145.2	diagnostic	string candidate replacement from known-token substrings and raw spans improves hard Qwen but needs suite check
