@@ -53,6 +53,7 @@ LEARN_WEIGHT_STEPS = 12
 LEARN_WEIGHT_LR = 0.2
 LEARN_WEIGHT_TEMP = 0.07
 DYNAMIC_ANCHOR_MAX_TOKENS = 100_000
+DYNAMIC_ANCHOR_REFRESH_ROUNDS = 4
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -312,7 +313,7 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
             used_p.add(p)
             assigned_scores.append((score, c))
         mapping = next_mapping
-        if use_dynamic_anchors and len(assigned_scores) >= 64:
+        if use_dynamic_anchors and round_idx < DYNAMIC_ANCHOR_REFRESH_ROUNDS and len(assigned_scores) >= 64:
             assigned_scores.sort(reverse=True)
             next_anchor_rows: list[int] = []
             seen_rows: set[int] = set()
