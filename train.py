@@ -53,6 +53,7 @@ LEARN_WEIGHT_STEPS = 12
 LEARN_WEIGHT_LR = 0.2
 LEARN_WEIGHT_TEMP = 0.07
 DYNAMIC_ANCHOR_MAX_TOKENS = 100_000
+LEARN_DYNAMIC_BLOCK_WEIGHTS = True
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -178,6 +179,55 @@ def learn_skip_weight(
     return learned
 
 
+def learn_block_weights(
+    c_blocks,
+    p_blocks,
+    c_anchor_rows: np.ndarray,
+    p_focus: np.ndarray,
+    p_anchors: np.ndarray,
+    device: str,
+) -> list[float] | None:
+    p_positions = {int(token_id): row for row, token_id in enumerate(p_focus)}
+    c_rows: list[int] = []
+    p_rows: list[int] = []
+    for anchor_idx, p_token in enumerate(p_anchors):
+        p_row = p_positions.get(int(p_token))
+        if p_row is None:
+            continue
+        c_rows.append(int(c_anchor_rows[anchor_idx]))
+        p_rows.append(p_row)
+        if len(c_rows) >= LEARN_WEIGHT_SEEDS:
+            break
+    if len(c_rows) < 64:
+        return None
+
+    c_idx = torch.as_tensor(c_rows, dtype=torch.long, device=device)
+    p_idx = torch.as_tensor(p_rows, dtype=torch.long, device=device)
+    with torch.enable_grad():
+        c_train = [block[c_idx].detach() for block in c_blocks]
+        p_train = [block[p_idx].detach() for block in p_blocks]
+        raw_weights = torch.full((len(c_train),), 0.54132485, dtype=torch.float32, device=device, requires_grad=True)
+        optimizer = torch.optim.Adam([raw_weights], lr=LEARN_WEIGHT_LR)
+        target = torch.arange(len(c_rows), dtype=torch.long, device=device)
+        for _ in range(LEARN_WEIGHT_STEPS):
+            optimizer.zero_grad(set_to_none=True)
+            weights = torch.nn.functional.softplus(raw_weights).clamp(0.05, 4.0)
+            c_vec = torch.cat([block * weights[idx] for idx, block in enumerate(c_train)], dim=1)
+            p_vec = torch.cat([block * weights[idx] for idx, block in enumerate(p_train)], dim=1)
+            c_vec = c_vec / torch.linalg.vector_norm(c_vec, dim=1, keepdim=True).clamp_min(1e-12)
+            p_vec = p_vec / torch.linalg.vector_norm(p_vec, dim=1, keepdim=True).clamp_min(1e-12)
+            logits = (c_vec @ p_vec.T) / LEARN_WEIGHT_TEMP
+            loss = 0.5 * (
+                torch.nn.functional.cross_entropy(logits, target)
+                + torch.nn.functional.cross_entropy(logits.T, target)
+            )
+            loss.backward()
+            optimizer.step()
+        learned = torch.nn.functional.softplus(raw_weights).clamp(0.05, 4.0).detach().cpu().tolist()
+        del c_train, p_train, c_vec, p_vec, logits, loss
+    return [float(weight) for weight in learned]
+
+
 def topk_edges(
     c_vec,
     p_vec,
@@ -255,27 +305,47 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
             if use_skip_context:
                 c_left2, c_right2 = torch_context_maps(cipher_ids, c_focus, c_anchors, device, offset=2)
                 p_left2, p_right2 = torch_context_maps(ref_ids, p_focus, p_anchors, device, offset=2)
-                skip_weight = SKIP_CONTEXT_WEIGHT
-                if LEARN_SKIP_WEIGHT:
-                    skip_weight = learn_skip_weight(
-                        c_left,
-                        c_right,
-                        c_left2,
-                        c_right2,
-                        p_left,
-                        p_right,
-                        p_left2,
-                        p_right2,
+                if use_dynamic_anchors and LEARN_DYNAMIC_BLOCK_WEIGHTS:
+                    block_weights = learn_block_weights(
+                        [c_left, c_right, c_left2, c_right2],
+                        [p_left, p_right, p_left2, p_right2],
                         anchor_rows,
                         p_focus,
                         p_anchors,
                         device,
                     )
-                    print(f"learned_skip_weight: {skip_weight:.4f}", flush=True)
-                c_left2.mul_(skip_weight)
-                c_right2.mul_(skip_weight)
-                p_left2.mul_(skip_weight)
-                p_right2.mul_(skip_weight)
+                    if block_weights is not None:
+                        for block, weight in zip([c_left, c_right, c_left2, c_right2], block_weights):
+                            block.mul_(weight)
+                        for block, weight in zip([p_left, p_right, p_left2, p_right2], block_weights):
+                            block.mul_(weight)
+                        print(
+                            "learned_block_weights: "
+                            + ",".join(f"{weight:.4f}" for weight in block_weights),
+                            flush=True,
+                        )
+                else:
+                    skip_weight = SKIP_CONTEXT_WEIGHT
+                    if LEARN_SKIP_WEIGHT:
+                        skip_weight = learn_skip_weight(
+                            c_left,
+                            c_right,
+                            c_left2,
+                            c_right2,
+                            p_left,
+                            p_right,
+                            p_left2,
+                            p_right2,
+                            anchor_rows,
+                            p_focus,
+                            p_anchors,
+                            device,
+                        )
+                        print(f"learned_skip_weight: {skip_weight:.4f}", flush=True)
+                    c_left2.mul_(skip_weight)
+                    c_right2.mul_(skip_weight)
+                    p_left2.mul_(skip_weight)
+                    p_right2.mul_(skip_weight)
                 c_parts.extend([c_left2, c_right2])
                 p_parts.extend([p_left2, p_right2])
             c_vec = normalize_features(torch.cat(c_parts, dim=1), c_counts[c_focus], device)
@@ -367,6 +437,7 @@ def main() -> None:
         "torch_topk": TORCH_TOPK,
         "skip_context": len(task.cipher_ids) >= SKIP_CONTEXT_MIN_TOKENS,
         "dynamic_anchors": len(task.cipher_ids) <= DYNAMIC_ANCHOR_MAX_TOKENS,
+        "learn_dynamic_block_weights": LEARN_DYNAMIC_BLOCK_WEIGHTS,
         "skip_context_weight": SKIP_CONTEXT_WEIGHT,
         "learn_skip_weight": LEARN_SKIP_WEIGHT,
         "elapsed_seconds": time.time() - t0,
