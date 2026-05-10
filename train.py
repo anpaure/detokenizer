@@ -85,7 +85,6 @@ EXTERNAL_OWNER_CONTEXTS = 8_192
 EXTERNAL_OWNER_CANDIDATES = 5
 EXTERNAL_OWNER_MIN_COUNT = 5
 EXTERNAL_OWNER_MIN_GAIN_PER_OCC = 0.35
-EXTERNAL_OWNER_PROTECT_TOP = 512
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -572,7 +571,6 @@ def external_owner_repair(
         owner_of_p[p_int] = c_int
 
     c_node_set = set(map(int, c_nodes))
-    protected = set(map(int, c_focus[: min(len(c_focus), EXTERNAL_OWNER_PROTECT_TOP)]))
     candidates: list[tuple[int, int, int]] = []
     candidates_seen: set[tuple[int, int]] = set()
     per_c_counts: dict[int, int] = {}
@@ -583,8 +581,6 @@ def external_owner_repair(
             continue
         owner = owner_of_p.get(int(p))
         if owner is None or owner == c or c_counts[owner] < EXTERNAL_OWNER_MIN_COUNT:
-            continue
-        if c in protected or owner in protected:
             continue
         used = per_c_counts.get(int(c), 0)
         if used >= EXTERNAL_OWNER_CANDIDATES:
