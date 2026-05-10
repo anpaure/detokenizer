@@ -78,7 +78,6 @@ TAIL_REPAIR_NODES = 1_024
 TAIL_REPAIR_CONTEXTS = 8_192
 TAIL_REPAIR_CANDIDATES = 8
 TAIL_REPAIR_MIN_GAIN_PER_OCC = 0.15
-TAIL_REPAIR_REJECT_OWNED_TARGETS = True
 EXTERNAL_OWNER_REPAIR = True
 EXTERNAL_OWNER_MAX_TOKENS = 100_000
 EXTERNAL_OWNER_NODES = 2_048
@@ -491,15 +490,6 @@ def tail_unary_repair(
     if len(candidate_p) < 64:
         return mapping
 
-    owner_of_p: dict[int, int] = {}
-    if TAIL_REPAIR_REJECT_OWNED_TARGETS:
-        for c in c_focus:
-            c_int = int(c)
-            p_int = int(mapping[c_int])
-            if p_int < 0 or p_int >= target_vocab_size or p_int in owner_of_p:
-                continue
-            owner_of_p[p_int] = c_int
-
     tail_arr = np.asarray(list(candidates_by_c.keys()), dtype=np.int64)
     context_c_arr = np.asarray(context_c, dtype=np.int64)
     context_p_arr = np.asarray(context_p, dtype=np.int64)
@@ -530,7 +520,6 @@ def tail_unary_repair(
 
     repaired = mapping.copy()
     accepted = 0
-    owned_rejected = 0
     accepted_gain_per_occ: list[float] = []
     for row, c in enumerate(tail_arr):
         cand = candidates_by_c[int(c)]
@@ -545,16 +534,10 @@ def tail_unary_repair(
         occ = max(1.0, float(c_counts[int(c)]))
         if best_local == current_local or gain / occ < TAIL_REPAIR_MIN_GAIN_PER_OCC:
             continue
-        if TAIL_REPAIR_REJECT_OWNED_TARGETS:
-            owner = owner_of_p.get(int(cand[best_local]))
-            if owner is not None and owner != int(c):
-                owned_rejected += 1
-                continue
         repaired[int(c)] = cand[best_local]
         accepted += 1
         accepted_gain_per_occ.append(gain / occ)
     print(f"tail_repair_nodes={len(tail_arr)} candidates={len(candidate_p_arr)} accepted={accepted}", flush=True)
-    print(f"tail_repair_reject_owned={TAIL_REPAIR_REJECT_OWNED_TARGETS} owned_rejected={owned_rejected}", flush=True)
     if accepted_gain_per_occ:
         gain_arr = np.asarray(accepted_gain_per_occ, dtype=np.float32)
         print(f"tail_repair_gain_per_occ_median={float(np.median(gain_arr)):.6f}", flush=True)
