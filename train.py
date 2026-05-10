@@ -45,6 +45,8 @@ FREQ_WEIGHT = 0.12
 TORCH_TOPK = 64
 TORCH_BATCH_SIZE = 256
 TORCH_CONTEXT_CHUNK = 5_000_000
+USE_CSLS = True
+CSLS_K = 10
 SKIP_CONTEXT_MIN_TOKENS = 100_000
 SKIP_CONTEXT_WEIGHT = 1.0
 LEARN_SKIP_WEIGHT = True
@@ -199,12 +201,26 @@ def topk_edges(
 ) -> list[tuple[float, int, int]]:
     p_log_t = torch.as_tensor(p_log[p_focus].astype(np.float32), dtype=torch.float32, device=device)
     p_rank_t = torch.as_tensor(p_rank[p_focus].astype(np.int64), dtype=torch.long, device=device)
+    p_csls_t = None
+    if USE_CSLS and len(c_focus) >= CSLS_K and len(p_focus) >= CSLS_K:
+        p_csls_t = torch.empty(len(p_focus), dtype=torch.float32, device=device)
+        for start in range(0, len(p_focus), TORCH_BATCH_SIZE):
+            stop = min(len(p_focus), start + TORCH_BATCH_SIZE)
+            sim_p = p_vec[start:stop] @ c_vec.T
+            values, _ = torch.topk(sim_p, k=CSLS_K, dim=1)
+            p_csls_t[start:stop] = values.mean(dim=1)
+            del sim_p, values
     edges: list[tuple[float, int, int]] = []
     k = min(TORCH_TOPK, len(p_focus))
     for start in range(0, len(c_focus), TORCH_BATCH_SIZE):
         stop = min(len(c_focus), start + TORCH_BATCH_SIZE)
         c_ids = c_focus[start:stop]
         sim = c_vec[start:stop] @ p_vec.T
+        if p_csls_t is not None:
+            values, _ = torch.topk(sim, k=CSLS_K, dim=1)
+            c_csls_t = values.mean(dim=1)
+            sim = 2.0 * sim - c_csls_t[:, None] - p_csls_t[None, :]
+            del values, c_csls_t
         c_log_t = torch.as_tensor(c_log[c_ids].astype(np.float32), dtype=torch.float32, device=device)
         sim -= FREQ_WEIGHT * torch.abs(c_log_t[:, None] - p_log_t[None, :])
         if candidate_window > 0:
@@ -350,6 +366,7 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
     use_skip_context = len(cipher_ids) >= SKIP_CONTEXT_MIN_TOKENS
     use_dynamic_anchors = len(cipher_ids) <= DYNAMIC_ANCHOR_MAX_TOKENS
     print(f"candidate_window: {candidate_window}", flush=True)
+    print(f"csls: {USE_CSLS}", flush=True)
     print(f"skip_context: {use_skip_context}", flush=True)
     print(f"dynamic_anchors: {use_dynamic_anchors}", flush=True)
     c_counts = counts(cipher_ids, int(max(target_vocab_size, int(cipher_ids.max()) + 1)))
@@ -539,6 +556,8 @@ def main() -> None:
         "rounds": effective_rounds(len(task.cipher_ids)),
         "freq_weight": FREQ_WEIGHT,
         "torch_topk": TORCH_TOPK,
+        "csls": USE_CSLS,
+        "csls_k": CSLS_K,
         "skip_context": len(task.cipher_ids) >= SKIP_CONTEXT_MIN_TOKENS,
         "dynamic_anchors": len(task.cipher_ids) <= DYNAMIC_ANCHOR_MAX_TOKENS,
         "dynamic_assignment_swaps": ENABLE_DYNAMIC_ASSIGNMENT_SWAPS,
