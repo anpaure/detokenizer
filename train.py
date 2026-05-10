@@ -15,6 +15,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from rapidfuzz.distance import Levenshtein
 
 from prepare import (
     DEFAULT_REFERENCE_TOKENS,
@@ -36,6 +37,7 @@ TARGET_TOKENS = int(os.environ.get("DETOK_TARGET_TOKENS", DEFAULT_TARGET_TOKENS)
 REFERENCE_TOKENS = int(os.environ.get("DETOK_REFERENCE_TOKENS", DEFAULT_REFERENCE_TOKENS))
 SAMPLE_TOKENS = int(os.environ.get("DETOK_SAMPLE_TOKENS", DEFAULT_SAMPLE_TOKENS))
 SEED = int(os.environ.get("DETOK_SEED", DEFAULT_SEED))
+ENABLE_DIAGNOSTICS = os.environ.get("DETOK_DIAGNOSTICS", "1") != "0"
 
 TOP_TOKENS = 50_000
 ANCHORS = 8_192
@@ -357,13 +359,21 @@ def refine_with_bigram_objective(
 
     proposals: list[tuple[int, int]] = []
     seen_proposals: set[tuple[int, int]] = set()
+    candidate_c_edges = 0
+    missing_p_edges = 0
+    duplicate_proposals = 0
     for _, c, p in edges:
         i = c_to_i.get(c)
         p_idx = p_to_i.get(p)
-        if i is None or p_idx is None:
+        if i is None:
+            continue
+        candidate_c_edges += 1
+        if p_idx is None:
+            missing_p_edges += 1
             continue
         key = (i, p_idx)
         if key in seen_proposals:
+            duplicate_proposals += 1
             continue
         seen_proposals.add(key)
         proposals.append(key)
@@ -372,6 +382,7 @@ def refine_with_bigram_objective(
 
     swaps = 0
     passes_run = 0
+    accepted_deltas: list[float] = []
     pass_budget = (
         BIGRAM_REFINE_LARGE_PASSES
         if BIGRAM_REFINE_LARGE_TOKEN_MIN_TOKENS <= len(cipher_ids) <= BIGRAM_REFINE_LARGE_TOKEN_MAX_TOKENS
@@ -387,6 +398,7 @@ def refine_with_bigram_objective(
             delta = bigram_swap_delta(c_big, p_log, perm, i, j)
             if delta <= 0.0:
                 continue
+            accepted_deltas.append(float(delta))
             pi = int(perm[i])
             pj = int(perm[j])
             perm[i], perm[j] = perm[j], perm[i]
@@ -401,9 +413,17 @@ def refine_with_bigram_objective(
         refined[c_nodes] = p_nodes[perm]
         mapping = refined
     print(f"bigram_refine_proposals={len(proposals)}", flush=True)
+    print(f"bigram_refine_candidate_c_edges={candidate_c_edges}", flush=True)
+    print(f"bigram_refine_missing_p_edges={missing_p_edges}", flush=True)
+    print(f"bigram_refine_duplicate_proposals={duplicate_proposals}", flush=True)
     print(f"bigram_refine_pass_budget={pass_budget}", flush=True)
     print(f"bigram_refine_passes={passes_run}", flush=True)
     print(f"bigram_refine_swaps={swaps}", flush=True)
+    if accepted_deltas:
+        delta_arr = np.asarray(accepted_deltas, dtype=np.float32)
+        print(f"bigram_refine_delta_median={float(np.median(delta_arr)):.6f}", flush=True)
+        print(f"bigram_refine_delta_p10={float(np.percentile(delta_arr, 10)):.6f}", flush=True)
+        print(f"bigram_refine_delta_p90={float(np.percentile(delta_arr, 90)):.6f}", flush=True)
     return mapping
 
 
@@ -493,6 +513,7 @@ def tail_unary_repair(
 
     repaired = mapping.copy()
     accepted = 0
+    accepted_gain_per_occ: list[float] = []
     for row, c in enumerate(tail_arr):
         cand = candidates_by_c[int(c)]
         if len(cand) <= 1:
@@ -508,7 +529,13 @@ def tail_unary_repair(
             continue
         repaired[int(c)] = cand[best_local]
         accepted += 1
+        accepted_gain_per_occ.append(gain / occ)
     print(f"tail_repair_nodes={len(tail_arr)} candidates={len(candidate_p_arr)} accepted={accepted}", flush=True)
+    if accepted_gain_per_occ:
+        gain_arr = np.asarray(accepted_gain_per_occ, dtype=np.float32)
+        print(f"tail_repair_gain_per_occ_median={float(np.median(gain_arr)):.6f}", flush=True)
+        print(f"tail_repair_gain_per_occ_p10={float(np.percentile(gain_arr, 10)):.6f}", flush=True)
+        print(f"tail_repair_gain_per_occ_p90={float(np.percentile(gain_arr, 90)):.6f}", flush=True)
     return repaired
 
 
@@ -686,6 +713,38 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
     return mapping
 
 
+def error_breakdown(original: str, recovered: str, max_chars: int = 50_000) -> dict[str, int]:
+    original = original[:max_chars]
+    recovered = recovered[:max_chars]
+    counts_by_class = {
+        "whitespace": 0,
+        "punctuation": 0,
+        "alnum": 0,
+        "replacement": 0,
+        "other": 0,
+    }
+
+    def classify(ch: str) -> str:
+        if ch == "\ufffd":
+            return "replacement"
+        if ch.isspace():
+            return "whitespace"
+        if ch.isalnum():
+            return "alnum"
+        if ch.isprintable():
+            return "punctuation"
+        return "other"
+
+    for op in Levenshtein.editops(original, recovered):
+        source_char = original[op.src_pos] if op.src_pos < len(original) else ""
+        dest_char = recovered[op.dest_pos] if op.dest_pos < len(recovered) else ""
+        label = classify(source_char or dest_char)
+        if label == "alnum" and dest_char and classify(dest_char) != "alnum":
+            label = classify(dest_char)
+        counts_by_class[label] += 1
+    return counts_by_class
+
+
 def main() -> None:
     t0 = time.time()
     task = load_task(
@@ -704,6 +763,11 @@ def main() -> None:
     mapped_sample = mapping[task.cipher_ids[:SAMPLE_TOKENS]]
     recovered_sample = task.target_adapter.decode(mapped_sample.tolist())
     metrics = evaluate_recovery(task, recovered_sample, SAMPLE_TOKENS)
+    diagnostics: dict[str, int] = {}
+    if ENABLE_DIAGNOSTICS:
+        original_sample = task.source_adapter.decode(task.secret_ids[:SAMPLE_TOKENS].astype(int).tolist())
+        diagnostics = error_breakdown(original_sample, recovered_sample)
+        print(f"error_breakdown: {json.dumps(diagnostics, sort_keys=True)}", flush=True)
 
     out_dir = CACHE_DIR / "runs"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -726,6 +790,7 @@ def main() -> None:
         "bigram_refine_all_scales": BIGRAM_REFINE_ALL_SCALES,
         "skip_context_weight": SKIP_CONTEXT_WEIGHT,
         "learn_skip_weight": LEARN_SKIP_WEIGHT,
+        "diagnostics": diagnostics,
         "elapsed_seconds": time.time() - t0,
         "metrics": metrics,
         "preview": recovered_sample[:1000],
