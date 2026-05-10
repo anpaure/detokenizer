@@ -47,6 +47,9 @@ TORCH_BATCH_SIZE = 256
 TORCH_CONTEXT_CHUNK = 5_000_000
 SKIP_CONTEXT_MIN_TOKENS = 100_000
 SKIP_CONTEXT_WEIGHT = 1.0
+PAIR_CONTEXT_MAX_TOKENS = 100_000
+PAIR_CONTEXT_BINS = 1_024
+PAIR_CONTEXT_WEIGHT = 1.0
 LEARN_SKIP_WEIGHT = True
 LEARN_WEIGHT_SEEDS = 512
 LEARN_WEIGHT_STEPS = 12
@@ -118,6 +121,73 @@ def torch_context_maps(ids: np.ndarray, focus: np.ndarray, anchors: np.ndarray, 
             right_flat += torch.bincount(flat, minlength=right_flat.numel()).to(torch.float32)
 
     return left_flat.view(len(focus), len(anchors)), right_flat.view(len(focus), len(anchors))
+
+
+def torch_anchor_pair_context_maps(
+    ids: np.ndarray,
+    focus: np.ndarray,
+    anchors: np.ndarray,
+    device: str,
+    bins: int,
+):
+    vocab_floor = int(max(int(ids.max(initial=0)), int(focus.max(initial=0)), int(anchors.max(initial=0)))) + 1
+    focus_lookup = torch.full((vocab_floor,), -1, dtype=torch.int32, device=device)
+    anchor_lookup = torch.full((vocab_floor,), -1, dtype=torch.int32, device=device)
+    focus_lookup[torch.as_tensor(focus.astype(np.int64), dtype=torch.long, device=device)] = torch.arange(
+        len(focus), dtype=torch.int32, device=device
+    )
+    anchor_lookup[torch.as_tensor(anchors.astype(np.int64), dtype=torch.long, device=device)] = torch.arange(
+        len(anchors), dtype=torch.int32, device=device
+    )
+    left_flat = torch.zeros(len(focus) * bins, dtype=torch.float32, device=device)
+    right_flat = torch.zeros_like(left_flat)
+    if len(ids) < 5:
+        return left_flat.view(len(focus), bins), right_flat.view(len(focus), bins)
+
+    for start in range(2, len(ids) - 2, TORCH_CONTEXT_CHUNK):
+        stop = min(len(ids) - 2, start + TORCH_CONTEXT_CHUNK)
+        prev2 = torch.as_tensor(ids[start - 2 : stop - 2].astype(np.int64, copy=False), dtype=torch.long, device=device)
+        prev1 = torch.as_tensor(ids[start - 1 : stop - 1].astype(np.int64, copy=False), dtype=torch.long, device=device)
+        mid = torch.as_tensor(ids[start:stop].astype(np.int64, copy=False), dtype=torch.long, device=device)
+        next1 = torch.as_tensor(ids[start + 1 : stop + 1].astype(np.int64, copy=False), dtype=torch.long, device=device)
+        next2 = torch.as_tensor(ids[start + 2 : stop + 2].astype(np.int64, copy=False), dtype=torch.long, device=device)
+
+        mid_ok = mid < vocab_floor
+        prev2_ok = prev2 < vocab_floor
+        prev1_ok = prev1 < vocab_floor
+        next1_ok = next1 < vocab_floor
+        next2_ok = next2 < vocab_floor
+
+        fi = torch.full_like(mid, -1, dtype=torch.int32)
+        a_prev2 = torch.full_like(prev2, -1, dtype=torch.int32)
+        a_prev1 = torch.full_like(prev1, -1, dtype=torch.int32)
+        a_next1 = torch.full_like(next1, -1, dtype=torch.int32)
+        a_next2 = torch.full_like(next2, -1, dtype=torch.int32)
+        fi[mid_ok] = focus_lookup[mid[mid_ok]]
+        a_prev2[prev2_ok] = anchor_lookup[prev2[prev2_ok]]
+        a_prev1[prev1_ok] = anchor_lookup[prev1[prev1_ok]]
+        a_next1[next1_ok] = anchor_lookup[next1[next1_ok]]
+        a_next2[next2_ok] = anchor_lookup[next2[next2_ok]]
+
+        mask = (fi >= 0) & (a_prev2 >= 0) & (a_prev1 >= 0)
+        if bool(mask.any()):
+            bucket = torch.remainder(
+                a_prev2[mask].to(torch.int64) * 1315423911 + a_prev1[mask].to(torch.int64) * 2654435761,
+                bins,
+            )
+            flat = fi[mask].to(torch.long) * bins + bucket
+            left_flat += torch.bincount(flat, minlength=left_flat.numel()).to(torch.float32)
+
+        mask = (fi >= 0) & (a_next1 >= 0) & (a_next2 >= 0)
+        if bool(mask.any()):
+            bucket = torch.remainder(
+                a_next1[mask].to(torch.int64) * 1315423911 + a_next2[mask].to(torch.int64) * 2654435761,
+                bins,
+            )
+            flat = fi[mask].to(torch.long) * bins + bucket
+            right_flat += torch.bincount(flat, minlength=right_flat.numel()).to(torch.float32)
+
+    return left_flat.view(len(focus), bins), right_flat.view(len(focus), bins)
 
 
 def normalize_features(x, token_counts: np.ndarray, device: str):
@@ -348,9 +418,11 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
     candidate_window = effective_candidate_window(len(cipher_ids))
     rounds = effective_rounds(len(cipher_ids))
     use_skip_context = len(cipher_ids) >= SKIP_CONTEXT_MIN_TOKENS
+    use_pair_context = len(cipher_ids) <= PAIR_CONTEXT_MAX_TOKENS
     use_dynamic_anchors = len(cipher_ids) <= DYNAMIC_ANCHOR_MAX_TOKENS
     print(f"candidate_window: {candidate_window}", flush=True)
     print(f"skip_context: {use_skip_context}", flush=True)
+    print(f"pair_context: {use_pair_context}", flush=True)
     print(f"dynamic_anchors: {use_dynamic_anchors}", flush=True)
     c_counts = counts(cipher_ids, int(max(target_vocab_size, int(cipher_ids.max()) + 1)))
     p_counts = counts(ref_ids, target_vocab_size)
@@ -405,11 +477,34 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
                 p_right2.mul_(skip_weight)
                 c_parts.extend([c_left2, c_right2])
                 p_parts.extend([p_left2, p_right2])
+            if use_pair_context:
+                c_pair_left, c_pair_right = torch_anchor_pair_context_maps(
+                    cipher_ids,
+                    c_focus,
+                    c_anchors,
+                    device,
+                    PAIR_CONTEXT_BINS,
+                )
+                p_pair_left, p_pair_right = torch_anchor_pair_context_maps(
+                    ref_ids,
+                    p_focus,
+                    p_anchors,
+                    device,
+                    PAIR_CONTEXT_BINS,
+                )
+                c_pair_left.mul_(PAIR_CONTEXT_WEIGHT)
+                c_pair_right.mul_(PAIR_CONTEXT_WEIGHT)
+                p_pair_left.mul_(PAIR_CONTEXT_WEIGHT)
+                p_pair_right.mul_(PAIR_CONTEXT_WEIGHT)
+                c_parts.extend([c_pair_left, c_pair_right])
+                p_parts.extend([p_pair_left, p_pair_right])
             c_vec = normalize_features(torch.cat(c_parts, dim=1), c_counts[c_focus], device)
             p_vec = normalize_features(torch.cat(p_parts, dim=1), p_counts[p_focus], device)
             del c_parts, p_parts, c_left, c_right, p_left, p_right
             if use_skip_context:
                 del c_left2, c_right2, p_left2, p_right2
+            if use_pair_context:
+                del c_pair_left, c_pair_right, p_pair_left, p_pair_right
             edges = topk_edges(
                 c_vec,
                 p_vec,
@@ -540,6 +635,8 @@ def main() -> None:
         "freq_weight": FREQ_WEIGHT,
         "torch_topk": TORCH_TOPK,
         "skip_context": len(task.cipher_ids) >= SKIP_CONTEXT_MIN_TOKENS,
+        "pair_context": len(task.cipher_ids) <= PAIR_CONTEXT_MAX_TOKENS,
+        "pair_context_bins": PAIR_CONTEXT_BINS,
         "dynamic_anchors": len(task.cipher_ids) <= DYNAMIC_ANCHOR_MAX_TOKENS,
         "dynamic_assignment_swaps": ENABLE_DYNAMIC_ASSIGNMENT_SWAPS,
         "skip_context_weight": SKIP_CONTEXT_WEIGHT,
