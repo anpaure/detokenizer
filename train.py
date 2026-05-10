@@ -56,6 +56,7 @@ DYNAMIC_ANCHOR_MAX_TOKENS = 100_000
 ENABLE_DYNAMIC_ASSIGNMENT_SWAPS = True
 ASSIGNMENT_SWAP_MIN_GAIN = 0.01
 BIGRAM_OBJECTIVE_REFINE = True
+BIGRAM_REFINE_ALL_SCALES = True
 BIGRAM_REFINE_TOKENS = 2_048
 BIGRAM_REFINE_MAX_PROPOSALS = 100_000
 BIGRAM_REFINE_PASSES = 4
@@ -477,7 +478,7 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
         for c, p in assigned_p_by_c.items():
             next_mapping[c] = p
         mapping = next_mapping
-        if round_idx == rounds - 1 and use_dynamic_anchors:
+        if round_idx == rounds - 1 and (use_dynamic_anchors or BIGRAM_REFINE_ALL_SCALES):
             mapping = refine_with_bigram_objective(
                 cipher_ids,
                 ref_ids,
@@ -542,6 +543,7 @@ def main() -> None:
         "skip_context": len(task.cipher_ids) >= SKIP_CONTEXT_MIN_TOKENS,
         "dynamic_anchors": len(task.cipher_ids) <= DYNAMIC_ANCHOR_MAX_TOKENS,
         "dynamic_assignment_swaps": ENABLE_DYNAMIC_ASSIGNMENT_SWAPS,
+        "bigram_refine_all_scales": BIGRAM_REFINE_ALL_SCALES,
         "skip_context_weight": SKIP_CONTEXT_WEIGHT,
         "learn_skip_weight": LEARN_SKIP_WEIGHT,
         "elapsed_seconds": time.time() - t0,
