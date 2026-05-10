@@ -39,6 +39,7 @@ REFERENCE_TOKENS = int(os.environ.get("DETOK_REFERENCE_TOKENS", DEFAULT_REFERENC
 SAMPLE_TOKENS = int(os.environ.get("DETOK_SAMPLE_TOKENS", DEFAULT_SAMPLE_TOKENS))
 SEED = int(os.environ.get("DETOK_SEED", DEFAULT_SEED))
 ENABLE_DIAGNOSTICS = os.environ.get("DETOK_DIAGNOSTICS", "1") != "0"
+ORACLE_RERANKER_DIAGNOSTIC = os.environ.get("DETOK_ORACLE_RERANKER_DIAGNOSTIC", "0") == "1"
 
 TOP_TOKENS = 50_000
 ANCHORS = 8_192
@@ -139,6 +140,11 @@ SINKHORN_WEIGHT = 0.25
 ORACLE_CANDIDATE_DIAGNOSTICS = True
 ORACLE_CANDIDATE_TOP_N = 4096
 ORACLE_CANDIDATE_KS = (1, 2, 5, 16, 64)
+ORACLE_RERANKER_TOP_K = 64
+ORACLE_RERANKER_STEPS = 220
+ORACLE_RERANKER_LR = 0.08
+ORACLE_RERANKER_L2 = 1.0e-3
+ORACLE_RERANKER_WEIGHT_CAP = 25.0
 
 LAST_FINAL_EDGES: list[tuple[float, int, int]] = []
 
@@ -1213,6 +1219,257 @@ def oracle_candidate_diagnostics(task, mapping: np.ndarray) -> dict[str, float]:
     return metrics
 
 
+def token_piece_features(piece: str) -> list[float]:
+    stripped = piece.strip()
+    return [
+        float(len(piece)),
+        float(len(piece.encode("utf-8", errors="replace"))),
+        float(piece.startswith(" ")),
+        float(piece.isspace()),
+        float("\n" in piece),
+        float(bool(stripped) and stripped.isdigit()),
+        float(any(ch.isalpha() for ch in piece)),
+        float(any(ch.isalnum() for ch in piece)),
+        float(bool(stripped) and all(not ch.isalnum() and not ch.isspace() for ch in stripped)),
+        float(any((not ch.isalnum()) and (not ch.isspace()) for ch in piece)),
+        float(piece[:1].isupper()),
+        float(piece[:1].islower()),
+    ]
+
+
+def collect_oracle_rerank_groups(name: str, task, mapping: np.ndarray) -> list[dict]:
+    c_counts = counts(task.cipher_ids, int(max(len(mapping), int(task.cipher_ids.max(initial=0)) + 1)))
+    p_counts = counts(task.ref_ids, task.target_adapter.spec.vocab_size)
+    c_focus = np.argsort(-c_counts)[:ORACLE_CANDIDATE_TOP_N].astype(np.int64)
+    c_focus_set = set(map(int, c_focus))
+    p_order = np.argsort(-p_counts)
+    p_rank = np.empty(task.target_adapter.spec.vocab_size, dtype=np.int64)
+    p_rank[p_order] = np.arange(task.target_adapter.spec.vocab_size)
+    inv_perm = np.empty(len(task.perm), dtype=np.int64)
+    inv_perm[task.perm.astype(np.int64)] = np.arange(len(task.perm), dtype=np.int64)
+
+    candidates_by_c: dict[int, list[tuple[float, int]]] = {}
+    seen_by_c: dict[int, set[int]] = {}
+    for score, c, p in sorted(LAST_FINAL_EDGES, reverse=True):
+        c_int = int(c)
+        if c_int not in c_focus_set:
+            continue
+        bucket = candidates_by_c.setdefault(c_int, [])
+        if len(bucket) >= ORACLE_RERANKER_TOP_K:
+            continue
+        seen = seen_by_c.setdefault(c_int, set())
+        p_int = int(p)
+        if p_int in seen:
+            continue
+        seen.add(p_int)
+        bucket.append((float(score), p_int))
+
+    owner_of_p: dict[int, int] = {}
+    for c in c_focus:
+        c_int = int(c)
+        p_int = int(mapping[c_int])
+        if 0 <= p_int < task.target_adapter.spec.vocab_size and p_int not in owner_of_p:
+            owner_of_p[p_int] = c_int
+
+    decode_cache: dict[int, str] = {}
+
+    def target_piece(p: int) -> str:
+        cached = decode_cache.get(p)
+        if cached is None:
+            cached = task.target_adapter.decode([p])
+            decode_cache[p] = cached
+        return cached
+
+    groups: list[dict] = []
+    total_single_mass = 0.0
+    positive_mass = 0.0
+    current_correct_mass = 0.0
+    edge_top1_mass = 0.0
+    for c in c_focus:
+        c_int = int(c)
+        cand = candidates_by_c.get(c_int)
+        if not cand:
+            continue
+        source_id = int(inv_perm[c_int])
+        source_piece = task.source_adapter.decode([source_id])
+        oracle_ids = task.target_adapter.encode(source_piece)
+        if len(oracle_ids) != 1:
+            continue
+        oracle_p = int(oracle_ids[0])
+        weight = float(c_counts[c_int])
+        total_single_mass += weight
+        if int(mapping[c_int]) == oracle_p:
+            current_correct_mass += weight
+        if cand and cand[0][1] == oracle_p:
+            edge_top1_mass += weight
+
+        label_idx = -1
+        best_score = cand[0][0]
+        current_p = int(mapping[c_int])
+        current_rank = int(p_rank[current_p]) if 0 <= current_p < len(p_rank) else len(p_rank)
+        c_log = np.log(max(1.0, weight))
+        feats: list[list[float]] = []
+        candidate_ids: list[int] = []
+        for rank, (score, p) in enumerate(cand):
+            if p == oracle_p:
+                label_idx = rank
+            p_count = float(p_counts[p])
+            p_log = np.log(max(1.0, p_count))
+            rank_delta = abs(float(p_rank[p] - current_rank)) / max(1.0, float(len(p_rank)))
+            owner = owner_of_p.get(p)
+            piece = target_piece(p)
+            feats.append(
+                [
+                    float(score),
+                    float(score - best_score),
+                    float(rank),
+                    1.0 / float(rank + 1),
+                    c_log,
+                    p_log,
+                    abs(c_log - p_log),
+                    rank_delta,
+                    float(p == current_p),
+                    float(owner is not None and owner != c_int),
+                    float(p_count / max(1.0, float(len(task.ref_ids)))),
+                ]
+                + token_piece_features(piece)
+            )
+            candidate_ids.append(p)
+        if label_idx >= 0:
+            positive_mass += weight
+        groups.append(
+            {
+                "task": name,
+                "cipher": c_int,
+                "weight": weight,
+                "features": np.asarray(feats, dtype=np.float32),
+                "label": label_idx,
+                "candidate_ids": candidate_ids,
+                "oracle": oracle_p,
+                "current_correct": int(current_p == oracle_p),
+                "edge_top1_correct": int(cand[0][1] == oracle_p),
+            }
+        )
+    print(
+        f"oracle_rerank_collect task={name} groups={len(groups)} single_mass={total_single_mass:.0f} "
+        f"top64_mass={positive_mass:.0f} current_top1={current_correct_mass / max(1.0, total_single_mass):.4f} "
+        f"edge_top1={edge_top1_mass / max(1.0, total_single_mass):.4f}",
+        flush=True,
+    )
+    return groups
+
+
+def train_oracle_group_reranker(groups: list[dict]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    train_groups = [g for g in groups if int(g["label"]) >= 0]
+    if not train_groups:
+        raise RuntimeError("no positive oracle reranker groups")
+    dim = int(train_groups[0]["features"].shape[1])
+    max_k = max(int(g["features"].shape[0]) for g in train_groups)
+    x = np.zeros((len(train_groups), max_k, dim), dtype=np.float32)
+    mask = np.zeros((len(train_groups), max_k), dtype=bool)
+    labels = np.zeros(len(train_groups), dtype=np.int64)
+    weights = np.zeros(len(train_groups), dtype=np.float32)
+    for row, g in enumerate(train_groups):
+        feat = g["features"]
+        k = feat.shape[0]
+        x[row, :k] = feat
+        mask[row, :k] = True
+        labels[row] = int(g["label"])
+        weights[row] = min(float(np.sqrt(float(g["weight"]))), ORACLE_RERANKER_WEIGHT_CAP)
+    flat = x[mask]
+    mean = flat.mean(axis=0)
+    std = flat.std(axis=0) + 1.0e-6
+    x = (x - mean[None, None, :]) / std[None, None, :]
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    xt = torch.as_tensor(x, dtype=torch.float32, device=device)
+    mt = torch.as_tensor(mask, dtype=torch.bool, device=device)
+    yt = torch.as_tensor(labels, dtype=torch.long, device=device)
+    wt = torch.as_tensor(weights / max(1.0e-6, float(weights.mean())), dtype=torch.float32, device=device)
+    coef = torch.zeros(dim, dtype=torch.float32, device=device, requires_grad=True)
+    opt = torch.optim.Adam([coef], lr=ORACLE_RERANKER_LR)
+    for _ in range(ORACLE_RERANKER_STEPS):
+        opt.zero_grad(set_to_none=True)
+        logits = xt @ coef
+        logits = logits.masked_fill(~mt, -1.0e9)
+        loss_by_group = torch.nn.functional.cross_entropy(logits, yt, reduction="none")
+        loss = (loss_by_group * wt).mean() + ORACLE_RERANKER_L2 * torch.sum(coef * coef)
+        loss.backward()
+        opt.step()
+    return coef.detach().cpu().numpy(), mean, std
+
+
+def evaluate_oracle_group_reranker(groups: list[dict], coef: np.ndarray, mean: np.ndarray, std: np.ndarray) -> dict[str, float]:
+    total = 0.0
+    covered = 0.0
+    current = 0.0
+    edge = 0.0
+    reranked = 0.0
+    changed = 0.0
+    for g in groups:
+        weight = float(g["weight"])
+        total += weight
+        label = int(g["label"])
+        current += weight * int(g["current_correct"])
+        edge += weight * int(g["edge_top1_correct"])
+        if label < 0:
+            continue
+        covered += weight
+        feat = (g["features"] - mean[None, :]) / std[None, :]
+        scores = feat @ coef
+        pred = int(np.argmax(scores))
+        reranked += weight * int(pred == label)
+        changed += weight * int(pred != 0)
+    return {
+        "groups": float(len(groups)),
+        "mass": total,
+        "coverage": covered / max(1.0, total),
+        "current_top1": current / max(1.0, total),
+        "edge_top1": edge / max(1.0, total),
+        "rerank_top1": reranked / max(1.0, total),
+        "rerank_top1_conditional": reranked / max(1.0, covered),
+        "changed_mass": changed / max(1.0, total),
+    }
+
+
+def oracle_reranker_diagnostic_main() -> None:
+    pairs = [
+        ("qwen", "qwen3_6_27b", "openai_o200k"),
+        ("mistral", "mistral_medium_3_5", "openai_o200k"),
+        ("gemma", "gemma4_31b", "openai_o200k"),
+    ]
+    collected: dict[str, list[dict]] = {}
+    for name, source, target in pairs:
+        print(f"oracle_reranker_task={name} source={source} target={target}", flush=True)
+        task = load_task(source, target, target_tokens=100_000, reference_tokens=REFERENCE_TOKENS, seed=SEED)
+        mapping = align_shuffled(task.cipher_ids, task.ref_ids, task.target_adapter.spec.vocab_size)
+        collected[name] = collect_oracle_rerank_groups(name, task, mapping)
+
+    folds: dict[str, dict[str, float]] = {}
+    for test_name, _, _ in pairs:
+        train_groups = [g for name, groups in collected.items() if name != test_name for g in groups]
+        test_groups = collected[test_name]
+        coef, mean, std = train_oracle_group_reranker(train_groups)
+        metrics = evaluate_oracle_group_reranker(test_groups, coef, mean, std)
+        folds[test_name] = metrics
+        print(f"oracle_reranker_fold={test_name} {json.dumps(metrics, sort_keys=True)}", flush=True)
+
+    total_mass = sum(m["mass"] for m in folds.values())
+    aggregate = {
+        key: sum(m[key] * m["mass"] for m in folds.values()) / max(1.0, total_mass)
+        for key in ("coverage", "current_top1", "edge_top1", "rerank_top1", "changed_mass")
+    }
+    aggregate["mass"] = total_mass
+    print(f"oracle_reranker_aggregate: {json.dumps(aggregate, sort_keys=True)}", flush=True)
+
+    out_dir = CACHE_DIR / "runs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "oracle_reranker_diagnostic.json").write_text(
+        json.dumps({"folds": folds, "aggregate": aggregate}, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
 def variable_emission_repair(
     cipher_ids: np.ndarray,
     ref_ids: np.ndarray,
@@ -1867,6 +2124,10 @@ def decode_with_string_lexicon(
 
 
 def main() -> None:
+    if ORACLE_RERANKER_DIAGNOSTIC:
+        oracle_reranker_diagnostic_main()
+        return
+
     t0 = time.time()
     task = load_task(
         SOURCE_TOKENIZER,
