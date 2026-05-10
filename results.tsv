@@ -165,3 +165,4 @@ c12cfb8	qwen36-o200k-100k-screen	0.459980	0.459980	2.688194	101.0	discard	Sinkho
 7868a16	core-100k-gemma	0.456320	0.464420	2.649429	6.3	keep	LCB-gated extra bigram pass accepts a tiny stable subset of overfit fifth-pass swaps and slightly improves 100k Gemma-core mean and BPB
 cce4022	qwen36-o200k-100k-screen	0.456560	0.456560	2.719339	116.8	discard	LCB-gated tail repair accepted only 27 of 830 candidate changes and underfit hard Qwen screen
 5cd344f	qwen36-o200k-100k-screen	0.452260	0.452260	2.696574	116.6	discard	LCB-gated external-owner repair accepted only 3 swaps and underfit hard Qwen screen
+b6388de	qwen36-o200k-100k-screen	0.452280	0.452280	2.692203	109.7	discard	LCB-gated variable emissions changed surviving emissions and regressed hard Qwen screen
