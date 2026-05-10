@@ -110,7 +110,7 @@ STRING_LEXICON_MIN_GAIN_PER_BYTE = 0.050
 STRING_LEXICON_MAX_ACCEPTED = 2
 STRING_LEXICON_ALLOW_EMPTY_SPLITS = False
 STRING_LEXICON_FORMAT_ONLY = True
-STRING_CANDIDATE_REPAIR = False
+STRING_CANDIDATE_REPAIR = True
 STRING_CANDIDATE_MAX_TOKENS = 100_000
 STRING_CANDIDATE_NODES = 128
 STRING_CANDIDATE_REF_TOKENS = 8_192
@@ -121,8 +121,9 @@ STRING_CANDIDATE_MAX_CONTEXTS = 512
 STRING_CANDIDATE_CONTEXT_RADIUS = 4
 STRING_CANDIDATE_MAX_CHARS = 24
 STRING_CANDIDATE_MIN_GAIN_PER_BYTE = 0.10
-STRING_CANDIDATE_MAX_ACCEPTED = 2
-SINKHORN_EDGE_REWEIGHT = True
+STRING_CANDIDATE_MAX_ACCEPTED = 1
+STRING_CANDIDATE_FORMAT_ONLY = True
+SINKHORN_EDGE_REWEIGHT = False
 SINKHORN_MAX_TOKENS = 100_000
 SINKHORN_NODES = 2_048
 SINKHORN_ITERS = 20
@@ -1542,6 +1543,8 @@ def string_candidate_repair(
         seen: set[str] = {base_piece}
         for label, pieces in inventory.items():
             if not candidate_class_compatible(base_label, label):
+                continue
+            if STRING_CANDIDATE_FORMAT_ONLY and label not in {"newline", "whitespace", "punctuation"}:
                 continue
             for piece in pieces:
                 if piece in seen:
