@@ -58,6 +58,8 @@ ASSIGNMENT_SWAP_MIN_GAIN = 0.01
 BIGRAM_OBJECTIVE_REFINE = True
 BIGRAM_REFINE_ALL_SCALES = True
 BIGRAM_REFINE_TOKENS = 2_048
+BIGRAM_REFINE_LARGE_TOKENS = 4_096
+BIGRAM_REFINE_LARGE_TOKEN_MIN_TOKENS = 1_000_000
 BIGRAM_REFINE_MAX_PROPOSALS = 100_000
 BIGRAM_REFINE_PASSES = 4
 BIGRAM_REFINE_ALPHA = 0.05
@@ -271,7 +273,12 @@ def refine_with_bigram_objective(
 ) -> np.ndarray:
     if not BIGRAM_OBJECTIVE_REFINE:
         return mapping
-    k = min(BIGRAM_REFINE_TOKENS, len(c_focus))
+    token_budget = (
+        BIGRAM_REFINE_LARGE_TOKENS
+        if len(cipher_ids) >= BIGRAM_REFINE_LARGE_TOKEN_MIN_TOKENS
+        else BIGRAM_REFINE_TOKENS
+    )
+    k = min(token_budget, len(c_focus))
     c_nodes = c_focus[:k]
     p_nodes_raw = mapping[c_nodes].astype(np.int64, copy=True)
     keep = np.zeros(k, dtype=bool)
@@ -287,6 +294,7 @@ def refine_with_bigram_objective(
     if k < 64:
         return mapping
 
+    print(f"bigram_refine_token_budget={token_budget}", flush=True)
     print(f"bigram_refine_tokens={k}", flush=True)
     c_big = dense_bigram_counts(cipher_ids, c_nodes, len(mapping))
     p_big = dense_bigram_counts(ref_ids, p_nodes, target_vocab_size)
