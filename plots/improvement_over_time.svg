@@ -21,7 +21,7 @@
 <text x="22" y="420" transform="rotate(-90 22 420)" text-anchor="middle" class="small">mean CER50k</text>
 <polyline points="86.0,137.9 159.0,138.0 207.7,138.2 272.5,138.5 305.0,138.5 337.4,138.5 410.4,190.9 442.9,208.3 459.1,208.3 548.3,212.7 605.1,227.1 621.3,233.6 629.4,240.4 637.5,252.5 645.6,255.7 653.7,259.4 994.4,262.7 1010.6,268.2" fill="none" stroke="#2563eb" stroke-width="2.2" opacity="0.75"/>
 <polyline points="134.7,413.0 142.8,413.5 167.1,417.4 191.4,419.2 215.8,419.2 264.4,440.0 288.8,458.6 321.2,485.3 418.5,485.3 742.9,496.4 767.3,505.5 799.7,511.1 840.3,512.7 864.6,514.1 897.0,516.5" fill="none" stroke="#16a34a" stroke-width="2.2" opacity="0.75"/>
-<polyline points="1075.5,261.9 1124.1,263.1 1213.3,263.2 1245.8,264.3 1253.9,264.8 1262.0,264.9 1302.6,264.9 1310.7,264.9 1408.0,264.9" fill="none" stroke="#9333ea" stroke-width="2.2" opacity="0.75"/>
+<polyline points="1075.5,261.9 1124.1,263.1 1213.3,263.2 1245.8,264.3 1253.9,264.8 1262.0,264.9 1302.6,264.9 1310.7,264.9" fill="none" stroke="#9333ea" stroke-width="2.2" opacity="0.75"/>
 <polyline points="183.3,618.8 223.9,620.9 280.7,649.2 296.9,659.0 329.3,730.6 751.1,734.2 783.5,734.2" fill="none" stroke="#dc2626" stroke-width="2.2" opacity="0.75"/>
 <circle cx="86.0" cy="137.9" r="4.3" fill="#2563eb" class="keep"><title>0 core-100k keep mean=0.551740: baseline 100k core suite</title></circle>
 <circle cx="94.1" cy="139.1" r="3.4" fill="#2563eb" class="discard"><title>1 core-100k discard mean=0.550788: 4096 anchors low-data test</title></circle>
@@ -101,7 +101,7 @@
 <circle cx="1262.0" cy="264.9" r="4.3" fill="#9333ea" class="keep"><title>145 core-100k-gemma keep mean=0.456372: 2048-token tail repair block slightly improves 100k suite mean and sharply improves max and BPB</title></circle>
 <circle cx="1302.6" cy="264.9" r="4.3" fill="#9333ea" class="keep"><title>150 core-100k-gemma keep mean=0.456364: free local-pair variable emission gives a tiny non-same-tokenizer 100k mean CER and BPB gain</title></circle>
 <circle cx="1310.7" cy="264.9" r="4.3" fill="#9333ea" class="keep"><title>151 core-100k-gemma keep mean=0.456364: two free local-pair variable emissions preserve CER gain and improve BPB versus single emission</title></circle>
-<circle cx="1408.0" cy="264.9" r="4.3" fill="#9333ea" class="keep"><title>163 core-100k-gemma keep mean=0.456320: LCB-gated extra bigram pass accepts a tiny stable subset of overfit fifth-pass swaps and slightly improves 100k Gemma-core mean and BPB</title></circle>
+<circle cx="1408.0" cy="264.9" r="3.4" fill="#9333ea" class="discard"><title>163 core-100k-gemma diagnostic mean=0.456320: LCB-gated extra bigram pass was a sub-threshold tiny gain; disabled under material-gain keep policy</title></circle>
 <circle cx="86" cy="828" r="5" fill="#2563eb"/>
 <text x="96" y="832" class="small">core-100k</text>
 <circle cx="331" cy="828" r="5" fill="#16a34a"/>
