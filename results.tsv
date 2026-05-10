@@ -140,3 +140,4 @@ b1fe675	qwen36-o200k-100k-screen	0.456920	0.456920	2.722763	6.3	discard	hard own
 d427a2c	qwen-mistral-gemma-100k-screen	0.461793	0.468280	2.686249	6.3	discard	stricter external-owner margin reduced accepted repairs but regressed all three non-same-tokenizer 100k screens
 bf9d884	core-100k-gemma	0.457632	0.467700	2.662603	6.3	keep	stricter tail repair threshold marginally improves Gemma-core 100k CER mean and max despite Qwen and DeepSeek regressions
 09a56e7	qwen-mistral-gemma-100k-screen	0.461413	0.467840	2.686061	6.3	discard	tail repair threshold 0.25 improves screen mean slightly but regresses Gemma max versus accepted 0.30
+850cdc2	core-100k-gemma	0.457656	0.467380	2.662814	6.3	discard	tail repair threshold 0.35 improves suite max but loses mean CER and BPB versus accepted 0.30
