@@ -4,121 +4,112 @@
 <text x="86" y="34" font-size="25" font-weight="700">Detokenizer Autoresearch: improvement over time</text>
 <text x="86" y="58" class="small">Running best accepted mean CER50k by evaluation suite; lower is better. Source-retokenized rows are diagnostic and excluded.</text>
 <line x1="86" y1="748.0" x2="1408" y2="748.0" class="grid"/>
-<text x="76" y="752.0" text-anchor="end" class="tiny">0.092</text>
+<text x="76" y="752.0" text-anchor="end" class="tiny">0.094</text>
 <line x1="86" y1="616.8" x2="1408" y2="616.8" class="grid"/>
-<text x="76" y="620.8" text-anchor="end" class="tiny">0.189</text>
+<text x="76" y="620.8" text-anchor="end" class="tiny">0.192</text>
 <line x1="86" y1="485.6" x2="1408" y2="485.6" class="grid"/>
-<text x="76" y="489.6" text-anchor="end" class="tiny">0.286</text>
+<text x="76" y="489.6" text-anchor="end" class="tiny">0.291</text>
 <line x1="86" y1="354.4" x2="1408" y2="354.4" class="grid"/>
-<text x="76" y="358.4" text-anchor="end" class="tiny">0.384</text>
+<text x="76" y="358.4" text-anchor="end" class="tiny">0.389</text>
 <line x1="86" y1="223.2" x2="1408" y2="223.2" class="grid"/>
-<text x="76" y="227.2" text-anchor="end" class="tiny">0.481</text>
+<text x="76" y="227.2" text-anchor="end" class="tiny">0.488</text>
 <line x1="86" y1="92.0" x2="1408" y2="92.0" class="grid"/>
-<text x="76" y="96.0" text-anchor="end" class="tiny">0.578</text>
+<text x="76" y="96.0" text-anchor="end" class="tiny">0.586</text>
 <line x1="86" y1="92" x2="86" y2="748" class="axis"/>
 <line x1="86" y1="748" x2="1408" y2="748" class="axis"/>
 <text x="747" y="802" text-anchor="middle" class="small">Experiment log row index</text>
-<text x="22" y="430" transform="rotate(-90 22 430)" text-anchor="middle" class="small">mean CER50k</text>
-<circle cx="86.0" cy="127.4" r="4.2" fill="#2563eb" class="keep"><title>0 core-100k keep mean=0.551740: baseline 100k core suite</title></circle>
-<circle cx="94.8" cy="128.7" r="4.2" fill="#2563eb" class="discard"><title>1 core-100k discard mean=0.550788: 4096 anchors low-data test</title></circle>
-<circle cx="121.0" cy="126.7" r="4.2" fill="#2563eb" class="discard"><title>4 core-100k discard mean=0.552256: torch_topk_128</title></circle>
-<circle cx="129.8" cy="127.0" r="4.2" fill="#2563eb" class="discard"><title>5 core-100k discard mean=0.552060: adaptive anchors for oversized cipher vocab</title></circle>
-<circle cx="156.0" cy="125.7" r="4.2" fill="#2563eb" class="discard"><title>8 core-100k discard mean=0.553000: candidate_window_25000</title></circle>
-<circle cx="164.8" cy="127.6" r="4.2" fill="#2563eb" class="keep"><title>9 core-100k keep mean=0.551616: scale-aware candidate window</title></circle>
-<circle cx="208.6" cy="128.4" r="4.2" fill="#2563eb" class="discard"><title>14 core-100k discard mean=0.551052: eight_refinement_rounds</title></circle>
-<circle cx="217.3" cy="127.8" r="4.2" fill="#2563eb" class="keep"><title>15 core-100k keep mean=0.551484: final scale-aware window and rounds</title></circle>
-<circle cx="287.4" cy="128.1" r="4.2" fill="#2563eb" class="keep"><title>23 core-100k keep mean=0.551288: skip context refactor guard at small scale</title></circle>
-<circle cx="322.4" cy="127.7" r="4.2" fill="#2563eb" class="keep"><title>27 core-100k keep mean=0.551568: full skip weight small-scale guard; skip inactive</title></circle>
-<circle cx="357.4" cy="127.9" r="4.2" fill="#2563eb" class="keep"><title>31 core-100k keep mean=0.551400: learned skip weight small-scale guard; skip inactive</title></circle>
-<circle cx="436.2" cy="181.2" r="4.2" fill="#2563eb" class="keep"><title>40 core-100k keep mean=0.511912: enable learned skip context at 100k</title></circle>
-<circle cx="453.7" cy="178.7" r="4.2" fill="#2563eb" class="discard"><title>42 core-100k discard mean=0.513796: eight rounds at 100k worsened learned skip-context</title></circle>
-<circle cx="462.5" cy="180.1" r="4.2" fill="#2563eb" class="discard"><title>43 core-100k discard mean=0.512716: wide candidate window at 100k improved max but worsened mean</title></circle>
-<circle cx="471.2" cy="198.9" r="4.2" fill="#2563eb" class="keep"><title>44 core-100k keep mean=0.498820: dynamic anchor refresh improves low-data alignment</title></circle>
-<circle cx="488.7" cy="198.9" r="4.2" fill="#2563eb" class="keep"><title>46 core-100k keep mean=0.498820: gate dynamic anchor refresh to 100k</title></circle>
-<circle cx="506.2" cy="196.4" r="4.2" fill="#2563eb" class="discard"><title>48 core-100k discard mean=0.500644: wide candidate window worsened dynamic-anchor 100k suite</title></circle>
-<circle cx="515.0" cy="197.6" r="4.2" fill="#2563eb" class="discard"><title>49 core-100k discard mean=0.499752: assignment-margin anchor refresh worsened low-data suite</title></circle>
-<circle cx="523.7" cy="195.5" r="4.2" fill="#2563eb" class="discard"><title>50 core-100k discard mean=0.501332: freezing dynamic anchors after early rounds worsened low-data suite</title></circle>
-<circle cx="550.0" cy="199.4" r="4.2" fill="#2563eb" class="discard"><title>53 core-100k discard mean=0.498456: learned dynamic block weights marginally improved mean but added disproportionate complexity</title></circle>
-<circle cx="558.8" cy="196.3" r="4.2" fill="#2563eb" class="discard"><title>54 core-100k discard mean=0.500752: static left-context downweighting regressed low-data suite</title></circle>
-<circle cx="576.3" cy="202.9" r="4.2" fill="#2563eb" class="discard"><title>56 core-100k discard mean=0.495868: assignment swap repair improved mean but regressed max hard pair</title></circle>
-<circle cx="585.0" cy="203.3" r="4.2" fill="#2563eb" class="keep"><title>57 core-100k keep mean=0.495560: thresholded assignment swap repair improves low-data mean and max without hard-pair regression</title></circle>
-<circle cx="593.8" cy="202.4" r="4.2" fill="#2563eb" class="discard"><title>58 core-100k discard mean=0.496196: stricter swap margin helped easy pairs but regressed hard-pair max and suite mean</title></circle>
-<circle cx="602.5" cy="204.2" r="4.2" fill="#2563eb" class="discard"><title>59 core-100k discard mean=0.494888: midpoint swap margin improved mean but overfit easy pairs and regressed hard-pair max</title></circle>
-<circle cx="628.8" cy="199.9" r="4.2" fill="#2563eb" class="discard"><title>62 core-100k discard mean=0.498080: byte-LM local reranker improved max and fluency but overrepaired Mistral/MiMo and worsened mean</title></circle>
-<circle cx="646.3" cy="217.9" r="4.2" fill="#2563eb" class="keep"><title>64 core-100k keep mean=0.484740: direct token-bigram objective refinement improves low-data mean and max across tokenizer pairs</title></circle>
-<circle cx="663.8" cy="224.5" r="4.2" fill="#2563eb" class="keep"><title>66 core-100k keep mean=0.479844: 50k direct-bigram swap proposals further improve low-data mean and max</title></circle>
-<circle cx="672.6" cy="231.4" r="4.2" fill="#2563eb" class="keep"><title>67 core-100k keep mean=0.474732: 100k direct-bigram swap proposals improve all low-data tokenizer pairs</title></circle>
-<circle cx="681.3" cy="243.7" r="4.2" fill="#2563eb" class="keep"><title>68 core-100k keep mean=0.465648: two direct-bigram refinement passes improve every low-data tokenizer pair</title></circle>
-<circle cx="690.1" cy="246.9" r="4.2" fill="#2563eb" class="keep"><title>69 core-100k keep mean=0.463248: third direct-bigram refinement pass improves aggregate and hard-pair max despite one easy-pair regression</title></circle>
-<circle cx="698.8" cy="250.6" r="4.2" fill="#2563eb" class="keep"><title>70 core-100k keep mean=0.460496: four direct-bigram refinement passes improve every low-data tokenizer pair over the third pass</title></circle>
-<circle cx="979.0" cy="233.9" r="4.2" fill="#2563eb" class="discard"><title>102 core-100k discard mean=0.472880: fixed-context bigram swap objective worsened low-data suite despite broader neighbor evidence</title></circle>
-<circle cx="987.8" cy="234.4" r="4.2" fill="#2563eb" class="discard"><title>103 core-100k discard mean=0.472496: repair-closure node selection overfit proposed swaps and worsened low-data suite</title></circle>
-<circle cx="1066.6" cy="254.0" r="4.2" fill="#2563eb" class="keep"><title>112 core-100k keep mean=0.457956: gated unigram-backoff smoothing tau 1000 improves low-data mean and max</title></circle>
-<circle cx="1084.1" cy="259.5" r="4.2" fill="#2563eb" class="keep"><title>114 core-100k keep mean=0.453876: fixed-neighbor tail unary repair improves low-data mean and max after gated unigram backoff</title></circle>
-<polyline points="86.0,127.4 164.8,127.6 217.3,127.8 287.4,128.1 436.2,181.2 471.2,198.9 488.7,198.9 585.0,203.3 646.3,217.9 663.8,224.5 672.6,231.4 681.3,243.7 690.1,246.9 698.8,250.6 1066.6,254.0 1084.1,259.5" fill="none" stroke="#2563eb" stroke-width="2.2" opacity=".8"/>
-<circle cx="1084.1" cy="259.5" r="5.8" fill="#fff" stroke="#2563eb" stroke-width="2.2"><title>core-100k best=0.453876 at a08609d: fixed-neighbor tail unary repair improves low-data mean and max after gated unigram backoff</title></circle>
-<text x="1093.1" y="251.5" font-size="13" font-weight="700" fill="#2563eb">core-100k 0.454</text>
-<circle cx="138.5" cy="406.3" r="4.2" fill="#059669" class="keep"><title>6 core-1m keep mean=0.345124: baseline 1m core suite</title></circle>
-<circle cx="147.3" cy="406.8" r="4.2" fill="#059669" class="keep"><title>7 core-1m keep mean=0.344772: candidate_window_25000</title></circle>
-<circle cx="173.5" cy="410.8" r="4.2" fill="#059669" class="keep"><title>10 core-1m keep mean=0.341820: scale-aware candidate window</title></circle>
-<circle cx="182.3" cy="410.8" r="4.2" fill="#059669" class="discard"><title>11 core-1m discard mean=0.341848: large_sample_window_20000</title></circle>
-<circle cx="199.8" cy="412.6" r="4.2" fill="#059669" class="keep"><title>13 core-1m keep mean=0.340460: eight_refinement_rounds</title></circle>
-<circle cx="226.1" cy="412.4" r="4.2" fill="#059669" class="keep"><title>16 core-1m keep mean=0.340636: final scale-aware window and rounds</title></circle>
-<circle cx="252.3" cy="411.1" r="4.2" fill="#059669" class="discard"><title>19 core-1m discard mean=0.341584: include current mapping edge</title></circle>
-<circle cx="278.6" cy="433.7" r="4.2" fill="#059669" class="keep"><title>22 core-1m keep mean=0.324816: skip distance-2 context features for large samples</title></circle>
-<circle cx="304.9" cy="452.6" r="4.2" fill="#059669" class="keep"><title>25 core-1m keep mean=0.310860: full weight distance-2 context</title></circle>
-<circle cx="339.9" cy="479.6" r="4.2" fill="#059669" class="keep"><title>29 core-1m keep mean=0.290864: learn skip-context weight from anchor pairs</title></circle>
-<circle cx="445.0" cy="477.9" r="4.2" fill="#059669" class="keep"><title>41 core-1m keep mean=0.292092: enable learned skip context at 100k; 1m guard</title></circle>
-<circle cx="480.0" cy="467.6" r="4.2" fill="#059669" class="discard"><title>45 core-1m discard mean=0.299716: dynamic anchor refresh regressed 1m guard</title></circle>
-<circle cx="795.2" cy="490.9" r="4.2" fill="#059669" class="keep"><title>81 core-1m keep mean=0.282488: all-scale direct bigram refinement improves 1m mean and max while preserving 100k path</title></circle>
-<circle cx="821.4" cy="500.1" r="4.2" fill="#059669" class="keep"><title>84 core-1m keep mean=0.275664: 4096-token high-data bigram refinement improves every 1m core pair</title></circle>
-<circle cx="856.4" cy="505.8" r="4.2" fill="#059669" class="keep"><title>88 core-1m keep mean=0.271432: 8192-token 1m block improves mean but slightly regresses Mistral max and runtime</title></circle>
-<circle cx="865.2" cy="503.9" r="4.2" fill="#059669" class="discard"><title>89 core-1m discard mean=0.272864: 6144-token 1m block improved runtime and max but lost too much mean CER versus 8192</title></circle>
-<circle cx="900.2" cy="507.3" r="4.2" fill="#059669" class="keep"><title>93 core-1m keep mean=0.270288: three 1m bigram passes improve mean max and runtime versus four passes</title></circle>
-<circle cx="926.5" cy="508.9" r="4.2" fill="#059669" class="keep"><title>96 core-1m keep mean=0.269164: mixing distance-2 bigrams into 1m refinement improves mean max and BPB</title></circle>
-<circle cx="944.0" cy="507.7" r="4.2" fill="#059669" class="discard"><title>98 core-1m discard mean=0.270004: quarter-weight skip bigrams improved BPB but lost mean CER versus half weight</title></circle>
-<circle cx="961.5" cy="511.2" r="4.2" fill="#059669" class="keep"><title>100 core-1m keep mean=0.267432: 0.4 skip-bigram weight improves 1m mean and max versus accepted half-weight setting</title></circle>
-<polyline points="138.5,406.3 147.3,406.8 173.5,410.8 199.8,412.6 278.6,433.7 304.9,452.6 339.9,479.6 795.2,490.9 821.4,500.1 856.4,505.8 900.2,507.3 926.5,508.9 961.5,511.2" fill="none" stroke="#059669" stroke-width="2.2" opacity=".8"/>
-<circle cx="961.5" cy="511.2" r="5.8" fill="#fff" stroke="#059669" stroke-width="2.2"><title>core-1m best=0.267432 at 0052f5c: 0.4 skip-bigram weight improves 1m mean and max versus accepted half-weight setting</title></circle>
-<text x="970.5" y="503.2" font-size="13" font-weight="700" fill="#059669">core-1m 0.267</text>
-<circle cx="1154.1" cy="253.2" r="4.2" fill="#7c3aed" class="keep"><title>122 core-100k-gemma keep mean=0.458608: recomputed core-100k with Gemma replacing redundant MiMo</title></circle>
-<circle cx="1206.6" cy="254.4" r="4.2" fill="#7c3aed" class="keep"><title>128 core-100k-gemma keep mean=0.457680: external-owner missed-candidate repair improves Gemma-core 100k mean and max despite Mistral regression</title></circle>
-<circle cx="1224.1" cy="254.2" r="4.2" fill="#7c3aed" class="discard"><title>130 core-100k-gemma discard mean=0.457860: jackknife-gated external-owner repair reduced Mistral overfit but lost suite mean and max versus raw owner repair</title></circle>
-<circle cx="1250.4" cy="254.6" r="4.2" fill="#7c3aed" class="discard"><title>133 core-100k-gemma discard mean=0.457544: wordish external-owner gate slightly improved mean but regressed Gemma max versus raw owner repair</title></circle>
-<circle cx="1302.9" cy="254.5" r="4.2" fill="#7c3aed" class="keep"><title>139 core-100k-gemma keep mean=0.457632: stricter tail repair threshold marginally improves Gemma-core 100k CER mean and max despite Qwen and DeepSeek regressions</title></circle>
-<circle cx="1320.5" cy="254.4" r="4.2" fill="#7c3aed" class="discard"><title>141 core-100k-gemma discard mean=0.457656: tail repair threshold 0.35 improves suite max but loses mean CER and BPB versus accepted 0.30</title></circle>
-<circle cx="1338.0" cy="255.6" r="4.2" fill="#7c3aed" class="keep"><title>143 core-100k-gemma keep mean=0.456796: larger 1280-token tail repair block improves Gemma-core 100k mean max and BPB despite Mistral regression</title></circle>
-<circle cx="1346.7" cy="256.1" r="4.2" fill="#7c3aed" class="keep"><title>144 core-100k-gemma keep mean=0.456392: larger 1536-token tail repair block improves Gemma-core 100k mean max and BPB while worsening Mistral</title></circle>
-<circle cx="1355.5" cy="256.2" r="4.2" fill="#7c3aed" class="keep"><title>145 core-100k-gemma keep mean=0.456372: 2048-token tail repair block slightly improves 100k suite mean and sharply improves max and BPB</title></circle>
-<circle cx="1399.2" cy="256.2" r="4.2" fill="#7c3aed" class="keep"><title>150 core-100k-gemma keep mean=0.456364: free local-pair variable emission gives a tiny non-same-tokenizer 100k mean CER and BPB gain</title></circle>
-<circle cx="1408.0" cy="256.2" r="4.2" fill="#7c3aed" class="keep"><title>151 core-100k-gemma keep mean=0.456364: two free local-pair variable emissions preserve CER gain and improve BPB versus single emission</title></circle>
-<polyline points="1154.1,253.2 1206.6,254.4 1302.9,254.5 1338.0,255.6 1346.7,256.1 1355.5,256.2 1399.2,256.2 1408.0,256.2" fill="none" stroke="#7c3aed" stroke-width="2.2" opacity=".8"/>
-<circle cx="1408.0" cy="256.2" r="5.8" fill="#fff" stroke="#7c3aed" stroke-width="2.2"><title>core-100k-gemma best=0.456364 at b46ca65: two free local-pair variable emissions preserve CER gain and improve BPB versus single emission</title></circle>
-<text x="1215.0" y="248.2" font-size="13" font-weight="700" fill="#7c3aed">core-100k-gemma 0.456</text>
-<circle cx="1162.9" cy="498.0" r="4.2" fill="#d97706" class="keep"><title>123 core-1m-gemma keep mean=0.277212: recomputed core-1m with Gemma replacing redundant MiMo</title></circle>
-<circle cx="1162.9" cy="498.0" r="5.8" fill="#fff" stroke="#d97706" stroke-width="2.2"><title>core-1m-gemma best=0.277212 at cfb3e24: recomputed core-1m with Gemma replacing redundant MiMo</title></circle>
-<text x="1171.9" y="490.0" font-size="13" font-weight="700" fill="#d97706">core-1m-gemma 0.277</text>
-<circle cx="191.1" cy="615.0" r="4.2" fill="#dc2626" class="keep"><title>12 core-10m-3pair keep mean=0.190540: scale-aware candidate window validation</title></circle>
-<circle cx="234.8" cy="617.1" r="4.2" fill="#dc2626" class="keep"><title>17 core-10m-3pair keep mean=0.188973: final scale-aware window and rounds</title></circle>
-<circle cx="296.1" cy="645.8" r="4.2" fill="#dc2626" class="keep"><title>24 core-10m-3pair keep mean=0.167713: skip distance-2 context features for large samples</title></circle>
-<circle cx="313.6" cy="655.6" r="4.2" fill="#dc2626" class="keep"><title>26 core-10m-3pair keep mean=0.160420: full weight distance-2 context</title></circle>
-<circle cx="348.6" cy="728.3" r="4.2" fill="#dc2626" class="keep"><title>30 core-10m-3pair keep mean=0.106620: learn skip-context weight from anchor pairs</title></circle>
-<circle cx="803.9" cy="731.9" r="4.2" fill="#dc2626" class="keep"><title>82 core-10m-3pair keep mean=0.103953: all-scale direct bigram refinement improves 10m mean with small Qwen max regression</title></circle>
-<circle cx="812.7" cy="731.9" r="4.2" fill="#dc2626" class="discard"><title>83 core-10m-3pair discard mean=0.103960: two bigram passes at 10m slightly improved max but worsened mean and BPB</title></circle>
-<circle cx="830.2" cy="728.9" r="4.2" fill="#dc2626" class="discard"><title>85 core-10m-3pair discard mean=0.106133: 4096-token high-data block regressed 10m mean despite slight Qwen max improvement</title></circle>
-<circle cx="838.9" cy="731.9" r="4.2" fill="#dc2626" class="keep"><title>86 core-10m-3pair keep mean=0.103947: gating 4096-token block to 1m restores 10m mean and keeps improved max</title></circle>
-<polyline points="191.1,615.0 234.8,617.1 296.1,645.8 313.6,655.6 348.6,728.3 803.9,731.9 838.9,731.9" fill="none" stroke="#dc2626" stroke-width="2.2" opacity=".8"/>
-<circle cx="838.9" cy="731.9" r="5.8" fill="#fff" stroke="#dc2626" stroke-width="2.2"><title>core-10m-3pair best=0.103947 at a14628b: gating 4096-token block to 1m restores 10m mean and keeps improved max</title></circle>
-<text x="847.9" y="723.9" font-size="13" font-weight="700" fill="#dc2626">core-10m-3pair 0.104</text>
-<circle cx="86" cy="756" r="5" fill="#2563eb"/>
-<text x="100" y="761" class="small">core-100k</text>
-<circle cx="371" cy="756" r="5" fill="#059669"/>
-<text x="385" y="761" class="small">core-1m</text>
-<circle cx="656" cy="756" r="5" fill="#7c3aed"/>
-<text x="670" y="761" class="small">core-100k-gemma</text>
-<circle cx="86" cy="780" r="5" fill="#d97706"/>
-<text x="100" y="785" class="small">core-1m-gemma</text>
-<circle cx="371" cy="780" r="5" fill="#dc2626"/>
-<text x="385" y="785" class="small">core-10m-3pair</text>
-<text x="86" y="842" class="tiny">core-100k: 0.552 -&gt; 0.454 (17.7% lower)  |  core-1m: 0.345 -&gt; 0.267 (22.5% lower)  |  core-100k-gemma: 0.459 -&gt; 0.456 (0.5% lower)  |  core-1m-gemma: 0.277 -&gt; 0.277 (0.0% lower)  |  core-10m-3pair: 0.191 -&gt; 0.104 (45.4% lower)</text>
+<text x="22" y="420" transform="rotate(-90 22 420)" text-anchor="middle" class="small">mean CER50k</text>
+<polyline points="86.0,137.9 159.0,138.0 207.7,138.2 272.5,138.5 305.0,138.5 337.4,138.5 410.4,190.9 442.9,208.3 459.1,208.3 548.3,212.7 605.1,227.1 621.3,233.6 629.4,240.4 637.5,252.5 645.6,255.7 653.7,259.4 994.4,262.7 1010.6,268.2" fill="none" stroke="#2563eb" stroke-width="2.2" opacity="0.75"/>
+<polyline points="134.7,413.0 142.8,413.5 167.1,417.4 191.4,419.2 215.8,419.2 264.4,440.0 288.8,458.6 321.2,485.3 418.5,485.3 742.9,496.4 767.3,505.5 799.7,511.1 840.3,512.7 864.6,514.1 897.0,516.5" fill="none" stroke="#16a34a" stroke-width="2.2" opacity="0.75"/>
+<polyline points="1075.5,261.9 1124.1,263.1 1213.3,263.2 1245.8,264.3 1253.9,264.8 1262.0,264.9 1302.6,264.9 1310.7,264.9 1408.0,264.9" fill="none" stroke="#9333ea" stroke-width="2.2" opacity="0.75"/>
+<polyline points="183.3,618.8 223.9,620.9 280.7,649.2 296.9,659.0 329.3,730.6 751.1,734.2 783.5,734.2" fill="none" stroke="#dc2626" stroke-width="2.2" opacity="0.75"/>
+<circle cx="86.0" cy="137.9" r="4.3" fill="#2563eb" class="keep"><title>0 core-100k keep mean=0.551740: baseline 100k core suite</title></circle>
+<circle cx="94.1" cy="139.1" r="3.4" fill="#2563eb" class="discard"><title>1 core-100k discard mean=0.550788: 4096 anchors low-data test</title></circle>
+<circle cx="118.4" cy="137.2" r="3.4" fill="#2563eb" class="discard"><title>4 core-100k discard mean=0.552256: torch_topk_128</title></circle>
+<circle cx="126.6" cy="137.4" r="3.4" fill="#2563eb" class="discard"><title>5 core-100k discard mean=0.552060: adaptive anchors for oversized cipher vocab</title></circle>
+<circle cx="134.7" cy="413.0" r="4.3" fill="#16a34a" class="keep"><title>6 core-1m keep mean=0.345124: baseline 1m core suite</title></circle>
+<circle cx="142.8" cy="413.5" r="4.3" fill="#16a34a" class="keep"><title>7 core-1m keep mean=0.344772: candidate_window_25000</title></circle>
+<circle cx="150.9" cy="136.2" r="3.4" fill="#2563eb" class="discard"><title>8 core-100k discard mean=0.553000: candidate_window_25000</title></circle>
+<circle cx="159.0" cy="138.0" r="4.3" fill="#2563eb" class="keep"><title>9 core-100k keep mean=0.551616: scale-aware candidate window</title></circle>
+<circle cx="167.1" cy="417.4" r="4.3" fill="#16a34a" class="keep"><title>10 core-1m keep mean=0.341820: scale-aware candidate window</title></circle>
+<circle cx="175.2" cy="417.4" r="3.4" fill="#16a34a" class="discard"><title>11 core-1m discard mean=0.341848: large_sample_window_20000</title></circle>
+<circle cx="183.3" cy="618.8" r="4.3" fill="#dc2626" class="keep"><title>12 core-10m-3pair keep mean=0.190540: scale-aware candidate window validation</title></circle>
+<circle cx="191.4" cy="419.2" r="4.3" fill="#16a34a" class="keep"><title>13 core-1m keep mean=0.340460: eight_refinement_rounds</title></circle>
+<circle cx="199.5" cy="138.8" r="3.4" fill="#2563eb" class="discard"><title>14 core-100k discard mean=0.551052: eight_refinement_rounds</title></circle>
+<circle cx="207.7" cy="138.2" r="4.3" fill="#2563eb" class="keep"><title>15 core-100k keep mean=0.551484: final scale-aware window and rounds</title></circle>
+<circle cx="215.8" cy="419.0" r="4.3" fill="#16a34a" class="keep"><title>16 core-1m keep mean=0.340636: final scale-aware window and rounds</title></circle>
+<circle cx="223.9" cy="620.9" r="4.3" fill="#dc2626" class="keep"><title>17 core-10m-3pair keep mean=0.188973: final scale-aware window and rounds</title></circle>
+<circle cx="240.1" cy="417.7" r="3.4" fill="#16a34a" class="discard"><title>19 core-1m discard mean=0.341584: include current mapping edge</title></circle>
+<circle cx="264.4" cy="440.0" r="4.3" fill="#16a34a" class="keep"><title>22 core-1m keep mean=0.324816: skip distance-2 context features for large samples</title></circle>
+<circle cx="272.5" cy="138.5" r="4.3" fill="#2563eb" class="keep"><title>23 core-100k keep mean=0.551288: skip context refactor guard at small scale</title></circle>
+<circle cx="280.7" cy="649.2" r="4.3" fill="#dc2626" class="keep"><title>24 core-10m-3pair keep mean=0.167713: skip distance-2 context features for large samples</title></circle>
+<circle cx="288.8" cy="458.6" r="4.3" fill="#16a34a" class="keep"><title>25 core-1m keep mean=0.310860: full weight distance-2 context</title></circle>
+<circle cx="296.9" cy="659.0" r="4.3" fill="#dc2626" class="keep"><title>26 core-10m-3pair keep mean=0.160420: full weight distance-2 context</title></circle>
+<circle cx="305.0" cy="138.1" r="4.3" fill="#2563eb" class="keep"><title>27 core-100k keep mean=0.551568: full skip weight small-scale guard; skip inactive</title></circle>
+<circle cx="321.2" cy="485.3" r="4.3" fill="#16a34a" class="keep"><title>29 core-1m keep mean=0.290864: learn skip-context weight from anchor pairs</title></circle>
+<circle cx="329.3" cy="730.6" r="4.3" fill="#dc2626" class="keep"><title>30 core-10m-3pair keep mean=0.106620: learn skip-context weight from anchor pairs</title></circle>
+<circle cx="337.4" cy="138.3" r="4.3" fill="#2563eb" class="keep"><title>31 core-100k keep mean=0.551400: learned skip weight small-scale guard; skip inactive</title></circle>
+<circle cx="410.4" cy="190.9" r="4.3" fill="#2563eb" class="keep"><title>40 core-100k keep mean=0.511912: enable learned skip context at 100k</title></circle>
+<circle cx="418.5" cy="483.6" r="4.3" fill="#16a34a" class="keep"><title>41 core-1m keep mean=0.292092: enable learned skip context at 100k; 1m guard</title></circle>
+<circle cx="426.6" cy="188.4" r="3.4" fill="#2563eb" class="discard"><title>42 core-100k discard mean=0.513796: eight rounds at 100k worsened learned skip-context</title></circle>
+<circle cx="434.7" cy="189.8" r="3.4" fill="#2563eb" class="discard"><title>43 core-100k discard mean=0.512716: wide candidate window at 100k improved max but worsened mean</title></circle>
+<circle cx="442.9" cy="208.3" r="4.3" fill="#2563eb" class="keep"><title>44 core-100k keep mean=0.498820: dynamic anchor refresh improves low-data alignment</title></circle>
+<circle cx="451.0" cy="473.5" r="3.4" fill="#16a34a" class="discard"><title>45 core-1m discard mean=0.299716: dynamic anchor refresh regressed 1m guard</title></circle>
+<circle cx="459.1" cy="208.3" r="4.3" fill="#2563eb" class="keep"><title>46 core-100k keep mean=0.498820: gate dynamic anchor refresh to 100k</title></circle>
+<circle cx="475.3" cy="205.9" r="3.4" fill="#2563eb" class="discard"><title>48 core-100k discard mean=0.500644: wide candidate window worsened dynamic-anchor 100k suite</title></circle>
+<circle cx="483.4" cy="207.1" r="3.4" fill="#2563eb" class="discard"><title>49 core-100k discard mean=0.499752: assignment-margin anchor refresh worsened low-data suite</title></circle>
+<circle cx="491.5" cy="205.0" r="3.4" fill="#2563eb" class="discard"><title>50 core-100k discard mean=0.501332: freezing dynamic anchors after early rounds worsened low-data suite</title></circle>
+<circle cx="515.9" cy="208.8" r="3.4" fill="#2563eb" class="discard"><title>53 core-100k discard mean=0.498456: learned dynamic block weights marginally improved mean but added disproportionate complexity</title></circle>
+<circle cx="524.0" cy="205.8" r="3.4" fill="#2563eb" class="discard"><title>54 core-100k discard mean=0.500752: static left-context downweighting regressed low-data suite</title></circle>
+<circle cx="540.2" cy="212.3" r="3.4" fill="#2563eb" class="discard"><title>56 core-100k discard mean=0.495868: assignment swap repair improved mean but regressed max hard pair</title></circle>
+<circle cx="548.3" cy="212.7" r="4.3" fill="#2563eb" class="keep"><title>57 core-100k keep mean=0.495560: thresholded assignment swap repair improves low-data mean and max without hard-pair regression</title></circle>
+<circle cx="556.4" cy="211.8" r="3.4" fill="#2563eb" class="discard"><title>58 core-100k discard mean=0.496196: stricter swap margin helped easy pairs but regressed hard-pair max and suite mean</title></circle>
+<circle cx="564.5" cy="213.6" r="3.4" fill="#2563eb" class="discard"><title>59 core-100k discard mean=0.494888: midpoint swap margin improved mean but overfit easy pairs and regressed hard-pair max</title></circle>
+<circle cx="588.8" cy="209.3" r="3.4" fill="#2563eb" class="discard"><title>62 core-100k discard mean=0.498080: byte-LM local reranker improved max and fluency but overrepaired Mistral/MiMo and worsened mean</title></circle>
+<circle cx="605.1" cy="227.1" r="4.3" fill="#2563eb" class="keep"><title>64 core-100k keep mean=0.484740: direct token-bigram objective refinement improves low-data mean and max across tokenizer pairs</title></circle>
+<circle cx="621.3" cy="233.6" r="4.3" fill="#2563eb" class="keep"><title>66 core-100k keep mean=0.479844: 50k direct-bigram swap proposals further improve low-data mean and max</title></circle>
+<circle cx="629.4" cy="240.4" r="4.3" fill="#2563eb" class="keep"><title>67 core-100k keep mean=0.474732: 100k direct-bigram swap proposals improve all low-data tokenizer pairs</title></circle>
+<circle cx="637.5" cy="252.5" r="4.3" fill="#2563eb" class="keep"><title>68 core-100k keep mean=0.465648: two direct-bigram refinement passes improve every low-data tokenizer pair</title></circle>
+<circle cx="645.6" cy="255.7" r="4.3" fill="#2563eb" class="keep"><title>69 core-100k keep mean=0.463248: third direct-bigram refinement pass improves aggregate and hard-pair max despite one easy-pair regression</title></circle>
+<circle cx="653.7" cy="259.4" r="4.3" fill="#2563eb" class="keep"><title>70 core-100k keep mean=0.460496: four direct-bigram refinement passes improve every low-data tokenizer pair over the third pass</title></circle>
+<circle cx="742.9" cy="496.4" r="4.3" fill="#16a34a" class="keep"><title>81 core-1m keep mean=0.282488: all-scale direct bigram refinement improves 1m mean and max while preserving 100k path</title></circle>
+<circle cx="751.1" cy="734.2" r="4.3" fill="#dc2626" class="keep"><title>82 core-10m-3pair keep mean=0.103953: all-scale direct bigram refinement improves 10m mean with small Qwen max regression</title></circle>
+<circle cx="759.2" cy="734.1" r="3.4" fill="#dc2626" class="discard"><title>83 core-10m-3pair discard mean=0.103960: two bigram passes at 10m slightly improved max but worsened mean and BPB</title></circle>
+<circle cx="767.3" cy="505.5" r="4.3" fill="#16a34a" class="keep"><title>84 core-1m keep mean=0.275664: 4096-token high-data bigram refinement improves every 1m core pair</title></circle>
+<circle cx="775.4" cy="731.2" r="3.4" fill="#dc2626" class="discard"><title>85 core-10m-3pair discard mean=0.106133: 4096-token high-data block regressed 10m mean despite slight Qwen max improvement</title></circle>
+<circle cx="783.5" cy="734.2" r="4.3" fill="#dc2626" class="keep"><title>86 core-10m-3pair keep mean=0.103947: gating 4096-token block to 1m restores 10m mean and keeps improved max</title></circle>
+<circle cx="799.7" cy="511.1" r="4.3" fill="#16a34a" class="keep"><title>88 core-1m keep mean=0.271432: 8192-token 1m block improves mean but slightly regresses Mistral max and runtime</title></circle>
+<circle cx="807.8" cy="509.2" r="3.4" fill="#16a34a" class="discard"><title>89 core-1m discard mean=0.272864: 6144-token 1m block improved runtime and max but lost too much mean CER versus 8192</title></circle>
+<circle cx="840.3" cy="512.7" r="4.3" fill="#16a34a" class="keep"><title>93 core-1m keep mean=0.270288: three 1m bigram passes improve mean max and runtime versus four passes</title></circle>
+<circle cx="864.6" cy="514.1" r="4.3" fill="#16a34a" class="keep"><title>96 core-1m keep mean=0.269164: mixing distance-2 bigrams into 1m refinement improves mean max and BPB</title></circle>
+<circle cx="880.8" cy="513.0" r="3.4" fill="#16a34a" class="discard"><title>98 core-1m discard mean=0.270004: quarter-weight skip bigrams improved BPB but lost mean CER versus half weight</title></circle>
+<circle cx="897.0" cy="516.5" r="4.3" fill="#16a34a" class="keep"><title>100 core-1m keep mean=0.267432: 0.4 skip-bigram weight improves 1m mean and max versus accepted half-weight setting</title></circle>
+<circle cx="913.3" cy="242.9" r="3.4" fill="#2563eb" class="discard"><title>102 core-100k discard mean=0.472880: fixed-context bigram swap objective worsened low-data suite despite broader neighbor evidence</title></circle>
+<circle cx="921.4" cy="243.4" r="3.4" fill="#2563eb" class="discard"><title>103 core-100k discard mean=0.472496: repair-closure node selection overfit proposed swaps and worsened low-data suite</title></circle>
+<circle cx="994.4" cy="262.7" r="4.3" fill="#2563eb" class="keep"><title>112 core-100k keep mean=0.457956: gated unigram-backoff smoothing tau 1000 improves low-data mean and max</title></circle>
+<circle cx="1010.6" cy="268.2" r="4.3" fill="#2563eb" class="keep"><title>114 core-100k keep mean=0.453876: fixed-neighbor tail unary repair improves low-data mean and max after gated unigram backoff</title></circle>
+<circle cx="1075.5" cy="261.9" r="4.3" fill="#9333ea" class="keep"><title>122 core-100k-gemma keep mean=0.458608: recomputed core-100k with Gemma replacing redundant MiMo</title></circle>
+<circle cx="1083.6" cy="503.4" r="4.3" fill="#f97316" class="keep"><title>123 core-1m-gemma keep mean=0.277212: recomputed core-1m with Gemma replacing redundant MiMo</title></circle>
+<circle cx="1099.8" cy="562.2" r="3.4" fill="#f97316" class="discard"><title>125 core-1m-gemma diagnostic mean=0.233060: source-retokenized high-data path improves every Gemma-core 1m pair but is out-of-scope for non-same-tokenizer evaluation</title></circle>
+<circle cx="1124.1" cy="263.1" r="4.3" fill="#9333ea" class="keep"><title>128 core-100k-gemma keep mean=0.457680: external-owner missed-candidate repair improves Gemma-core 100k mean and max despite Mistral regression</title></circle>
+<circle cx="1140.4" cy="262.9" r="3.4" fill="#9333ea" class="discard"><title>130 core-100k-gemma discard mean=0.457860: jackknife-gated external-owner repair reduced Mistral overfit but lost suite mean and max versus raw owner repair</title></circle>
+<circle cx="1164.7" cy="263.3" r="3.4" fill="#9333ea" class="discard"><title>133 core-100k-gemma discard mean=0.457544: wordish external-owner gate slightly improved mean but regressed Gemma max versus raw owner repair</title></circle>
+<circle cx="1213.3" cy="263.2" r="4.3" fill="#9333ea" class="keep"><title>139 core-100k-gemma keep mean=0.457632: stricter tail repair threshold marginally improves Gemma-core 100k CER mean and max despite Qwen and DeepSeek regressions</title></circle>
+<circle cx="1229.6" cy="263.1" r="3.4" fill="#9333ea" class="discard"><title>141 core-100k-gemma discard mean=0.457656: tail repair threshold 0.35 improves suite max but loses mean CER and BPB versus accepted 0.30</title></circle>
+<circle cx="1245.8" cy="264.3" r="4.3" fill="#9333ea" class="keep"><title>143 core-100k-gemma keep mean=0.456796: larger 1280-token tail repair block improves Gemma-core 100k mean max and BPB despite Mistral regression</title></circle>
+<circle cx="1253.9" cy="264.8" r="4.3" fill="#9333ea" class="keep"><title>144 core-100k-gemma keep mean=0.456392: larger 1536-token tail repair block improves Gemma-core 100k mean max and BPB while worsening Mistral</title></circle>
+<circle cx="1262.0" cy="264.9" r="4.3" fill="#9333ea" class="keep"><title>145 core-100k-gemma keep mean=0.456372: 2048-token tail repair block slightly improves 100k suite mean and sharply improves max and BPB</title></circle>
+<circle cx="1302.6" cy="264.9" r="4.3" fill="#9333ea" class="keep"><title>150 core-100k-gemma keep mean=0.456364: free local-pair variable emission gives a tiny non-same-tokenizer 100k mean CER and BPB gain</title></circle>
+<circle cx="1310.7" cy="264.9" r="4.3" fill="#9333ea" class="keep"><title>151 core-100k-gemma keep mean=0.456364: two free local-pair variable emissions preserve CER gain and improve BPB versus single emission</title></circle>
+<circle cx="1408.0" cy="264.9" r="4.3" fill="#9333ea" class="keep"><title>163 core-100k-gemma keep mean=0.456320: LCB-gated extra bigram pass accepts a tiny stable subset of overfit fifth-pass swaps and slightly improves 100k Gemma-core mean and BPB</title></circle>
+<circle cx="86" cy="828" r="5" fill="#2563eb"/>
+<text x="96" y="832" class="small">core-100k</text>
+<circle cx="331" cy="828" r="5" fill="#16a34a"/>
+<text x="341" y="832" class="small">core-1m</text>
+<circle cx="576" cy="828" r="5" fill="#9333ea"/>
+<text x="586" y="832" class="small">core-100k-gemma</text>
+<circle cx="821" cy="828" r="5" fill="#f97316"/>
+<text x="831" y="832" class="small">core-1m-gemma</text>
+<circle cx="1066" cy="828" r="5" fill="#dc2626"/>
+<text x="1076" y="832" class="small">core-10m-3pair</text>
 </svg>
