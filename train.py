@@ -120,7 +120,7 @@ def normalize_features(x, token_counts: np.ndarray, device: str):
     return x
 
 
-def learn_skip_weights(
+def learn_skip_weight(
     c_left,
     c_right,
     c_left2,
@@ -132,7 +132,7 @@ def learn_skip_weights(
     p_focus: np.ndarray,
     p_anchors: np.ndarray,
     device: str,
-) -> tuple[float, float]:
+) -> float:
     p_positions = {int(token_id): row for row, token_id in enumerate(p_focus)}
     c_rows: list[int] = []
     p_rows: list[int] = []
@@ -145,33 +145,23 @@ def learn_skip_weights(
         if len(c_rows) >= LEARN_WEIGHT_SEEDS:
             break
     if len(c_rows) < 64:
-        return SKIP_CONTEXT_WEIGHT, SKIP_CONTEXT_WEIGHT
+        return SKIP_CONTEXT_WEIGHT
 
     c_idx = torch.as_tensor(c_rows, dtype=torch.long, device=device)
     p_idx = torch.as_tensor(p_rows, dtype=torch.long, device=device)
     with torch.enable_grad():
-        c_left_seed = c_left[c_idx].detach()
-        c_right_seed = c_right[c_idx].detach()
-        p_left_seed = p_left[p_idx].detach()
-        p_right_seed = p_right[p_idx].detach()
-        c_left2_seed = c_left2[c_idx].detach()
-        c_right2_seed = c_right2[c_idx].detach()
-        p_left2_seed = p_left2[p_idx].detach()
-        p_right2_seed = p_right2[p_idx].detach()
-        raw_weights = torch.full((2,), 0.54132485, dtype=torch.float32, device=device, requires_grad=True)
-        optimizer = torch.optim.Adam([raw_weights], lr=LEARN_WEIGHT_LR)
+        c_base = torch.cat([c_left[c_idx], c_right[c_idx]], dim=1).detach()
+        p_base = torch.cat([p_left[p_idx], p_right[p_idx]], dim=1).detach()
+        c_skip = torch.cat([c_left2[c_idx], c_right2[c_idx]], dim=1).detach()
+        p_skip = torch.cat([p_left2[p_idx], p_right2[p_idx]], dim=1).detach()
+        raw_weight = torch.tensor(0.54132485, dtype=torch.float32, device=device, requires_grad=True)
+        optimizer = torch.optim.Adam([raw_weight], lr=LEARN_WEIGHT_LR)
         target = torch.arange(len(c_rows), dtype=torch.long, device=device)
         for _ in range(LEARN_WEIGHT_STEPS):
             optimizer.zero_grad(set_to_none=True)
-            weights = torch.nn.functional.softplus(raw_weights).clamp(0.05, 4.0)
-            c_vec = torch.cat(
-                [c_left_seed, c_right_seed, c_left2_seed * weights[0], c_right2_seed * weights[1]],
-                dim=1,
-            )
-            p_vec = torch.cat(
-                [p_left_seed, p_right_seed, p_left2_seed * weights[0], p_right2_seed * weights[1]],
-                dim=1,
-            )
+            weight = torch.nn.functional.softplus(raw_weight).clamp(0.05, 4.0)
+            c_vec = torch.cat([c_base, c_skip * weight], dim=1)
+            p_vec = torch.cat([p_base, p_skip * weight], dim=1)
             c_vec = c_vec / torch.linalg.vector_norm(c_vec, dim=1, keepdim=True).clamp_min(1e-12)
             p_vec = p_vec / torch.linalg.vector_norm(p_vec, dim=1, keepdim=True).clamp_min(1e-12)
             logits = (c_vec @ p_vec.T) / LEARN_WEIGHT_TEMP
@@ -181,22 +171,8 @@ def learn_skip_weights(
             )
             loss.backward()
             optimizer.step()
-        learned_weights = torch.nn.functional.softplus(raw_weights).clamp(0.05, 4.0).detach().cpu()
-        learned = float(learned_weights[0]), float(learned_weights[1])
-        del (
-            c_left_seed,
-            c_right_seed,
-            p_left_seed,
-            p_right_seed,
-            c_left2_seed,
-            c_right2_seed,
-            p_left2_seed,
-            p_right2_seed,
-            c_vec,
-            p_vec,
-            logits,
-            loss,
-        )
+        learned = float(torch.nn.functional.softplus(raw_weight).clamp(0.05, 4.0).detach().cpu())
+        del c_base, p_base, c_skip, p_skip, c_vec, p_vec, logits, loss
     return learned
 
 
@@ -273,10 +249,9 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
             if use_skip_context:
                 c_left2, c_right2 = torch_context_maps(cipher_ids, c_focus, c_anchors, device, offset=2)
                 p_left2, p_right2 = torch_context_maps(ref_ids, p_focus, p_anchors, device, offset=2)
-                skip_left_weight = SKIP_CONTEXT_WEIGHT
-                skip_right_weight = SKIP_CONTEXT_WEIGHT
+                skip_weight = SKIP_CONTEXT_WEIGHT
                 if LEARN_SKIP_WEIGHT:
-                    skip_left_weight, skip_right_weight = learn_skip_weights(
+                    skip_weight = learn_skip_weight(
                         c_left,
                         c_right,
                         c_left2,
@@ -289,14 +264,11 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
                         p_anchors,
                         device,
                     )
-                    print(
-                        f"learned_skip_weights: {skip_left_weight:.4f},{skip_right_weight:.4f}",
-                        flush=True,
-                    )
-                c_left2.mul_(skip_left_weight)
-                c_right2.mul_(skip_right_weight)
-                p_left2.mul_(skip_left_weight)
-                p_right2.mul_(skip_right_weight)
+                    print(f"learned_skip_weight: {skip_weight:.4f}", flush=True)
+                c_left2.mul_(skip_weight)
+                c_right2.mul_(skip_weight)
+                p_left2.mul_(skip_weight)
+                p_right2.mul_(skip_weight)
                 c_parts.extend([c_left2, c_right2])
                 p_parts.extend([p_left2, p_right2])
             c_vec = normalize_features(torch.cat(c_parts, dim=1), c_counts[c_focus], device)
