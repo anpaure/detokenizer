@@ -53,6 +53,7 @@ LEARN_WEIGHT_STEPS = 12
 LEARN_WEIGHT_LR = 0.2
 LEARN_WEIGHT_TEMP = 0.07
 DYNAMIC_ANCHOR_MAX_TOKENS = 100_000
+ENABLE_DYNAMIC_ASSIGNMENT_SWAPS = True
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -302,15 +303,53 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
         edges.sort(reverse=True)
         used_c: set[int] = set()
         used_p: set[int] = set()
-        assigned_scores: list[tuple[float, int]] = []
-        next_mapping = mapping.copy()
+        assigned_p_by_c: dict[int, int] = {}
+        assigned_c_by_p: dict[int, int] = {}
+        assigned_score_by_c: dict[int, float] = {}
+        score_by_c: dict[int, dict[int, float]] | None = {} if use_dynamic_anchors and ENABLE_DYNAMIC_ASSIGNMENT_SWAPS else None
+        if score_by_c is not None:
+            for score, c, p in edges:
+                score_by_c.setdefault(c, {})[p] = score
+
         for score, c, p in edges:
             if c in used_c or p in used_p:
                 continue
-            next_mapping[c] = p
+            assigned_p_by_c[c] = p
+            assigned_c_by_p[p] = c
+            assigned_score_by_c[c] = score
             used_c.add(c)
             used_p.add(p)
-            assigned_scores.append((score, c))
+
+        swap_count = 0
+        if score_by_c is not None:
+            for score, c, p in edges:
+                current_p = assigned_p_by_c.get(c)
+                other_c = assigned_c_by_p.get(p)
+                if current_p is None or other_c is None or current_p == p or other_c == c:
+                    continue
+                other_scores = score_by_c.get(other_c)
+                if other_scores is None:
+                    continue
+                other_new_score = other_scores.get(current_p)
+                if other_new_score is None:
+                    continue
+                current_score = assigned_score_by_c[c]
+                other_current_score = assigned_score_by_c[other_c]
+                if score + other_new_score <= current_score + other_current_score:
+                    continue
+                assigned_p_by_c[c] = p
+                assigned_p_by_c[other_c] = current_p
+                assigned_c_by_p[p] = c
+                assigned_c_by_p[current_p] = other_c
+                assigned_score_by_c[c] = score
+                assigned_score_by_c[other_c] = other_new_score
+                swap_count += 1
+            print(f"assignment_swaps={swap_count}", flush=True)
+
+        assigned_scores = [(score, c) for c, score in assigned_score_by_c.items()]
+        next_mapping = mapping.copy()
+        for c, p in assigned_p_by_c.items():
+            next_mapping[c] = p
         mapping = next_mapping
         if use_dynamic_anchors and len(assigned_scores) >= 64:
             assigned_scores.sort(reverse=True)
@@ -367,6 +406,7 @@ def main() -> None:
         "torch_topk": TORCH_TOPK,
         "skip_context": len(task.cipher_ids) >= SKIP_CONTEXT_MIN_TOKENS,
         "dynamic_anchors": len(task.cipher_ids) <= DYNAMIC_ANCHOR_MAX_TOKENS,
+        "dynamic_assignment_swaps": ENABLE_DYNAMIC_ASSIGNMENT_SWAPS,
         "skip_context_weight": SKIP_CONTEXT_WEIGHT,
         "learn_skip_weight": LEARN_SKIP_WEIGHT,
         "elapsed_seconds": time.time() - t0,
