@@ -129,6 +129,7 @@ def learn_skip_weight(
     p_right,
     p_left2,
     p_right2,
+    c_anchor_rows: np.ndarray,
     p_focus: np.ndarray,
     p_anchors: np.ndarray,
     device: str,
@@ -136,11 +137,11 @@ def learn_skip_weight(
     p_positions = {int(token_id): row for row, token_id in enumerate(p_focus)}
     c_rows: list[int] = []
     p_rows: list[int] = []
-    for c_row, p_token in enumerate(p_anchors):
+    for anchor_idx, p_token in enumerate(p_anchors):
         p_row = p_positions.get(int(p_token))
         if p_row is None:
             continue
-        c_rows.append(c_row)
+        c_rows.append(int(c_anchor_rows[anchor_idx]))
         p_rows.append(p_row)
         if len(c_rows) >= LEARN_WEIGHT_SEEDS:
             break
@@ -236,9 +237,11 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
     p_log = np.log(np.maximum(p_counts, 1) / max(1, int(p_counts.sum())))
     p_rank = np.empty(target_vocab_size, dtype=np.int64)
     p_rank[p_order_all] = np.arange(target_vocab_size)
+    c_focus_pos = {int(token_id): row for row, token_id in enumerate(c_focus)}
+    anchor_rows = np.arange(min(ANCHORS, len(c_focus)), dtype=np.int64)
 
     for round_idx in range(rounds):
-        c_anchors = c_focus[: min(ANCHORS, len(c_focus))]
+        c_anchors = c_focus[anchor_rows]
         p_anchors = mapping[c_anchors]
         print(f"round {round_idx + 1}/{rounds}: focus={len(c_focus)} anchors={len(c_anchors)}", flush=True)
         with torch.no_grad():
@@ -260,6 +263,7 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
                         p_right,
                         p_left2,
                         p_right2,
+                        anchor_rows,
                         p_focus,
                         p_anchors,
                         device,
@@ -295,14 +299,31 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
         edges.sort(reverse=True)
         used_c: set[int] = set()
         used_p: set[int] = set()
+        assigned_scores: list[tuple[float, int]] = []
         next_mapping = mapping.copy()
-        for _, c, p in edges:
+        for score, c, p in edges:
             if c in used_c or p in used_p:
                 continue
             next_mapping[c] = p
             used_c.add(c)
             used_p.add(p)
+            assigned_scores.append((score, c))
         mapping = next_mapping
+        if len(assigned_scores) >= 64:
+            assigned_scores.sort(reverse=True)
+            next_anchor_rows: list[int] = []
+            seen_rows: set[int] = set()
+            for _, c in assigned_scores:
+                row = c_focus_pos.get(int(c))
+                if row is None or row in seen_rows:
+                    continue
+                next_anchor_rows.append(row)
+                seen_rows.add(row)
+                if len(next_anchor_rows) >= min(ANCHORS, len(c_focus)):
+                    break
+            if len(next_anchor_rows) >= 64:
+                anchor_rows = np.asarray(next_anchor_rows, dtype=np.int64)
+                print(f"anchor_refresh={len(anchor_rows)}", flush=True)
         print(f"assigned={len(used_c)}", flush=True)
     return mapping
 
