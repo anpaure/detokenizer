@@ -149,3 +149,4 @@ a4a6ab8	core-100k-gemma	0.456372	0.464420	2.650276	6.3	keep	2048-token tail repa
 88bc1ee	qwen36-o200k-100k-screen	0.454780	0.454780	2.703605	6.3	discard	target-side length-2 variable emissions accepted 14 expansions and over-inserted on hard Qwen screen
 dfd85ab	qwen36-o200k-100k-screen	0.451680	0.451680	2.693335	6.3	discard	high-margin variable emissions improved BPB but still lost exact CER on hard Qwen screen
 2c77200	qwen-mistral-gemma-100k-screen	0.459920	0.464420	2.673779	6.3	discard	single strongest variable emission is CER-neutral on three-pair screen with only tiny BPB gain
+1406268	core-100k-gemma	0.456364	0.464420	2.649934	6.3	keep	free local-pair variable emission gives a tiny non-same-tokenizer 100k mean CER and BPB gain
