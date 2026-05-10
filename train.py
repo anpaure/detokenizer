@@ -68,6 +68,8 @@ BIGRAM_REFINE_SKIP_WEIGHT = 0.4
 BIGRAM_REFINE_SKIP_MIN_TOKENS = 1_000_000
 BIGRAM_REFINE_SKIP_MAX_TOKENS = 1_000_000
 BIGRAM_REFINE_ALPHA = 0.05
+BIGRAM_REPAIR_CLOSURE_MAX_TOKENS = 100_000
+BIGRAM_REPAIR_CLOSURE_PREFIX_FRAC = 0.70
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -244,6 +246,57 @@ def dense_bigram_counts(ids: np.ndarray, nodes: np.ndarray, vocab_floor: int, of
     return np.bincount(flat, minlength=k * k).reshape(k, k).astype(np.float32)
 
 
+def select_bigram_refine_nodes(
+    c_focus: np.ndarray,
+    mapping: np.ndarray,
+    edges: list[tuple[float, int, int]],
+    target_vocab_size: int,
+    token_budget: int,
+    num_cipher_tokens: int,
+) -> np.ndarray:
+    if num_cipher_tokens > BIGRAM_REPAIR_CLOSURE_MAX_TOKENS:
+        return c_focus[: min(token_budget, len(c_focus))]
+
+    focus_set = set(map(int, c_focus))
+    owner_of_p: dict[int, int] = {}
+    for c in c_focus:
+        c_int = int(c)
+        p_int = int(mapping[c_int])
+        if 0 <= p_int < target_vocab_size and p_int not in owner_of_p:
+            owner_of_p[p_int] = c_int
+
+    selected: list[int] = []
+    selected_c: set[int] = set()
+    selected_p: set[int] = set()
+
+    def add(c_int: int) -> None:
+        if len(selected) >= token_budget or c_int in selected_c or c_int not in focus_set:
+            return
+        p_int = int(mapping[c_int])
+        if p_int < 0 or p_int >= target_vocab_size or p_int in selected_p:
+            return
+        selected.append(c_int)
+        selected_c.add(c_int)
+        selected_p.add(p_int)
+
+    prefix_budget = max(64, min(token_budget, int(token_budget * BIGRAM_REPAIR_CLOSURE_PREFIX_FRAC)))
+    for c in c_focus[:prefix_budget]:
+        add(int(c))
+    for _, c, p in edges:
+        add(int(c))
+        owner = owner_of_p.get(int(p))
+        if owner is not None:
+            add(owner)
+        if len(selected) >= token_budget:
+            break
+    for c in c_focus:
+        add(int(c))
+        if len(selected) >= token_budget:
+            break
+    print(f"bigram_repair_closure_nodes={len(selected)} prefix_budget={prefix_budget}", flush=True)
+    return np.asarray(selected, dtype=np.int64)
+
+
 def bigram_swap_delta(c_big: np.ndarray, p_log: np.ndarray, perm: np.ndarray, a: int, b: int) -> float:
     pa = int(perm[a])
     pb = int(perm[b])
@@ -284,7 +337,7 @@ def refine_with_bigram_objective(
         else BIGRAM_REFINE_TOKENS
     )
     k = min(token_budget, len(c_focus))
-    c_nodes = c_focus[:k]
+    c_nodes = select_bigram_refine_nodes(c_focus, mapping, edges, target_vocab_size, k, len(cipher_ids))
     p_nodes_raw = mapping[c_nodes].astype(np.int64, copy=True)
     keep = np.zeros(k, dtype=bool)
     seen: set[int] = set()
