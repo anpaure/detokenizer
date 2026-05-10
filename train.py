@@ -52,9 +52,6 @@ LEARN_WEIGHT_SEEDS = 512
 LEARN_WEIGHT_STEPS = 12
 LEARN_WEIGHT_LR = 0.2
 LEARN_WEIGHT_TEMP = 0.07
-USE_AUCTION_ASSIGNMENT = True
-AUCTION_EPS = 1.0e-4
-AUCTION_MAX_STEPS_PER_TOKEN = 20
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -216,70 +213,6 @@ def topk_edges(
     return edges
 
 
-def assign_edges(edges: list[tuple[float, int, int]], mapping: np.ndarray) -> tuple[np.ndarray, int]:
-    if not USE_AUCTION_ASSIGNMENT:
-        edges.sort(reverse=True)
-        used_c: set[int] = set()
-        used_p: set[int] = set()
-        next_mapping = mapping.copy()
-        for _, c, p in edges:
-            if c in used_c or p in used_p:
-                continue
-            next_mapping[c] = p
-            used_c.add(c)
-            used_p.add(p)
-        return next_mapping, len(used_c)
-
-    by_c: dict[int, dict[int, float]] = {}
-    for score, c, p in edges:
-        candidates = by_c.setdefault(c, {})
-        old = candidates.get(p)
-        if old is None or score > old:
-            candidates[p] = score
-    ordered: dict[int, list[tuple[int, float]]] = {
-        c: sorted(candidates.items(), key=lambda item: item[1], reverse=True)
-        for c, candidates in by_c.items()
-    }
-
-    prices: dict[int, float] = {}
-    owner: dict[int, int] = {}
-    assigned: dict[int, int] = {}
-    queue = list(ordered)
-    max_steps = max(1, AUCTION_MAX_STEPS_PER_TOKEN * len(queue))
-    steps = 0
-    while queue and steps < max_steps:
-        c = queue.pop()
-        candidates = ordered.get(c)
-        if not candidates:
-            continue
-        best_p = candidates[0][0]
-        best_value = -float("inf")
-        second_value = -float("inf")
-        for p, score in candidates:
-            value = score - prices.get(p, 0.0)
-            if value > best_value:
-                second_value = best_value
-                best_value = value
-                best_p = p
-            elif value > second_value:
-                second_value = value
-        if second_value == -float("inf"):
-            second_value = best_value - 1.0
-        prices[best_p] = prices.get(best_p, 0.0) + best_value - second_value + AUCTION_EPS
-        previous = owner.get(best_p)
-        owner[best_p] = c
-        assigned[c] = best_p
-        if previous is not None and previous != c:
-            assigned.pop(previous, None)
-            queue.append(previous)
-        steps += 1
-
-    next_mapping = mapping.copy()
-    for c, p in assigned.items():
-        next_mapping[c] = p
-    return next_mapping, len(assigned)
-
-
 def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_size: int) -> np.ndarray:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device: {device}", flush=True)
@@ -359,8 +292,18 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
             if device == "cuda":
                 torch.cuda.empty_cache()
 
-        mapping, assigned_count = assign_edges(edges, mapping)
-        print(f"assigned={assigned_count}", flush=True)
+        edges.sort(reverse=True)
+        used_c: set[int] = set()
+        used_p: set[int] = set()
+        next_mapping = mapping.copy()
+        for _, c, p in edges:
+            if c in used_c or p in used_p:
+                continue
+            next_mapping[c] = p
+            used_c.add(c)
+            used_p.add(p)
+        mapping = next_mapping
+        print(f"assigned={len(used_c)}", flush=True)
     return mapping
 
 
@@ -401,7 +344,6 @@ def main() -> None:
         "skip_context": len(task.cipher_ids) >= SKIP_CONTEXT_MIN_TOKENS,
         "skip_context_weight": SKIP_CONTEXT_WEIGHT,
         "learn_skip_weight": LEARN_SKIP_WEIGHT,
-        "use_auction_assignment": USE_AUCTION_ASSIGNMENT,
         "elapsed_seconds": time.time() - t0,
         "metrics": metrics,
         "preview": recovered_sample[:1000],
