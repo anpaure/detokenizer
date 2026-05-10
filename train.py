@@ -23,7 +23,6 @@ from prepare import (
     DEFAULT_SEED,
     DEFAULT_TARGET_TOKENS,
     CACHE_DIR,
-    encode_reference,
     evaluate_recovery,
     load_task,
 )
@@ -79,8 +78,6 @@ TAIL_REPAIR_NODES = 1_024
 TAIL_REPAIR_CONTEXTS = 8_192
 TAIL_REPAIR_CANDIDATES = 8
 TAIL_REPAIR_MIN_GAIN_PER_OCC = 0.15
-USE_SOURCE_RETOKENIZED_REF = True
-SOURCE_RETOKENIZED_REF_MIN_TOKENS = 1_000_000
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -762,22 +759,9 @@ def main() -> None:
     print(f"cipher_tokens: {len(task.cipher_ids):,}")
     print(f"reference_tokens: {len(task.ref_ids):,}")
 
-    use_source_retokenized = USE_SOURCE_RETOKENIZED_REF and len(task.cipher_ids) >= SOURCE_RETOKENIZED_REF_MIN_TOKENS
-    if use_source_retokenized:
-        ref_ids = encode_reference(task.source_adapter, task.reference_text, REFERENCE_TOKENS)
-        decode_adapter = task.source_adapter
-        target_vocab_size = task.source_adapter.spec.vocab_size
-        print(f"source_retokenized_ref: True", flush=True)
-        print(f"source_reference_tokens: {len(ref_ids):,}", flush=True)
-    else:
-        ref_ids = task.ref_ids
-        decode_adapter = task.target_adapter
-        target_vocab_size = task.target_adapter.spec.vocab_size
-        print(f"source_retokenized_ref: False", flush=True)
-
-    mapping = align_shuffled(task.cipher_ids, ref_ids, target_vocab_size)
+    mapping = align_shuffled(task.cipher_ids, task.ref_ids, task.target_adapter.spec.vocab_size)
     mapped_sample = mapping[task.cipher_ids[:SAMPLE_TOKENS]]
-    recovered_sample = decode_adapter.decode(mapped_sample.tolist())
+    recovered_sample = task.target_adapter.decode(mapped_sample.tolist())
     metrics = evaluate_recovery(task, recovered_sample, SAMPLE_TOKENS)
     diagnostics: dict[str, int] = {}
     if ENABLE_DIAGNOSTICS:
@@ -791,10 +775,8 @@ def main() -> None:
     report = {
         "source_tokenizer": task.source_adapter.spec.name,
         "target_tokenizer": task.target_adapter.spec.name,
-        "decode_tokenizer": decode_adapter.spec.name,
         "target_tokens": int(len(task.cipher_ids)),
-        "reference_tokens": int(len(ref_ids)),
-        "source_retokenized_ref": use_source_retokenized,
+        "reference_tokens": int(len(task.ref_ids)),
         "sample_tokens": SAMPLE_TOKENS,
         "top_tokens": TOP_TOKENS,
         "anchors": ANCHORS,
