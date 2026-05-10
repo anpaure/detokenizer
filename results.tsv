@@ -155,3 +155,4 @@ c122aa2	qwen-mistral-gemma-100k-screen	0.461040	0.466300	2.673816	6.3	discard	fo
 56349a8	qwen-mistral-gemma-100k-screen	0.460727	0.466300	2.674984	6.3	discard	three free local-pair emissions still over-insert on Mistral, confirming two-emission cap
 fde19ae	qwen36-o200k-100k-screen	0.456080	0.456080	2.677547	124.0	discard	string lexicon boundary/split repair accepted four pair overrides including empty many-to-one pieces and regressed hard Qwen screen
 de84781	qwen36-o200k-100k-screen	0.450860	0.450860	2.679816	122.9	diagnostic	non-empty string boundary shifts beat hard Qwen screen with two pair moves but need cross-tokenizer suite
+de84781	qwen-mistral-gemma-100k-screen	0.457500	0.464960	2.665664	118.3	discard	non-empty string boundary shifts improve Qwen but regress Mistral/Gemma enough to miss accepted 100k suite
