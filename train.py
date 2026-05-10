@@ -94,6 +94,7 @@ VARIABLE_EMISSION_BIGRAM_CANDIDATES = 6
 VARIABLE_EMISSION_MIN_COUNT = 10
 VARIABLE_EMISSION_MIN_GAIN_PER_OCC = 5.00
 VARIABLE_EMISSION_MAX_ACCEPTED = 1
+VARIABLE_EMISSION_FREE_LOCAL_PAIRS = True
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -976,6 +977,7 @@ def variable_emission_repair(
     succ = dense_cross_bigram_counts(ref_ids, seed_arr, pool_arr, target_vocab_size)
     pred = dense_cross_bigram_counts(ref_ids, pool_arr, seed_arr, target_vocab_size).T
     pool_by_idx = [int(p) for p in pool_arr]
+    pool_pos = {int(p): i for i, p in enumerate(pool_arr)}
     seed_pos = {p: i for i, p in enumerate(seed_p)}
 
     candidates_by_c: dict[int, list[tuple[int, int]]] = {}
@@ -1016,12 +1018,16 @@ def variable_emission_repair(
     context_p_arr = np.asarray(context_p, dtype=np.int64)
     candidate_arr = np.asarray(sorted(candidate_token_seen), dtype=np.int64)
     candidate_pos = {int(p): i for i, p in enumerate(candidate_arr)}
-    context_pos = {int(p): i for i, p in enumerate(context_p_arr)}
 
     c_right = dense_cross_bigram_counts(cipher_ids, repair_arr, context_c_arr, len(mapping))
     c_left = dense_cross_bigram_counts(cipher_ids, context_c_arr, repair_arr, len(mapping)).T
     p_context_to_candidate = dense_cross_bigram_counts(ref_ids, context_p_arr, candidate_arr, target_vocab_size)
     p_candidate_to_context = dense_cross_bigram_counts(ref_ids, candidate_arr, context_p_arr, target_vocab_size)
+    p_candidate_bigram = (
+        dense_bigram_counts(ref_ids, candidate_arr, target_vocab_size)
+        if VARIABLE_EMISSION_FREE_LOCAL_PAIRS
+        else None
+    )
 
     total_ref = float(max(1, int(p_counts.sum())))
     alpha = BIGRAM_REFINE_ALPHA
@@ -1040,17 +1046,20 @@ def variable_emission_repair(
         (p_candidate_to_context + alpha * context_unigram[None, :]) / candidate_den
     ).astype(np.float32)
 
-    pool_pos = {int(p): i for i, p in enumerate(pool_arr)}
-
     def internal_log(first: int, second: int) -> float:
-        row = seed_pos.get(first)
-        col = pool_pos.get(second)
-        if row is not None and col is not None:
-            cnt = float(succ[row, col])
+        first_idx = candidate_pos.get(first)
+        second_idx = candidate_pos.get(second)
+        if p_candidate_bigram is not None and first_idx is not None and second_idx is not None:
+            cnt = float(p_candidate_bigram[first_idx, second_idx])
         else:
-            row2 = seed_pos.get(second)
-            col2 = pool_pos.get(first)
-            cnt = float(pred[row2, col2]) if row2 is not None and col2 is not None else 0.0
+            row = seed_pos.get(first)
+            col = pool_pos.get(second)
+            if row is not None and col is not None:
+                cnt = float(succ[row, col])
+            else:
+                row2 = seed_pos.get(second)
+                col2 = pool_pos.get(first)
+                cnt = float(pred[row2, col2]) if row2 is not None and col2 is not None else 0.0
         uni = (float(p_counts[second]) + alpha) / (total_ref + alpha * target_vocab_size)
         return float(np.log((cnt + alpha * uni) / (float(p_counts[first]) + alpha)))
 
@@ -1067,7 +1076,25 @@ def variable_emission_repair(
         occ = max(1.0, float(c_counts[c_int]))
         best_pair: tuple[int, int] | None = None
         best_score = current_score
-        for first, second in candidates_by_c.get(c_int, []):
+        local_pairs = candidates_by_c.get(c_int, [])
+        if VARIABLE_EMISSION_FREE_LOCAL_PAIRS:
+            local_tokens = sorted({tok for pair in local_pairs for tok in pair} | {current})
+            expanded_pairs: list[tuple[int, int]] = []
+            for first in local_tokens:
+                first_idx = candidate_pos.get(first)
+                if first_idx is None:
+                    continue
+                for second in local_tokens:
+                    if first == second:
+                        continue
+                    second_idx = candidate_pos.get(second)
+                    if second_idx is None:
+                        continue
+                    if p_candidate_bigram is not None and p_candidate_bigram[first_idx, second_idx] <= 0:
+                        continue
+                    expanded_pairs.append((first, second))
+            local_pairs = expanded_pairs
+        for first, second in local_pairs:
             first_idx = candidate_pos.get(first)
             second_idx = candidate_pos.get(second)
             if first_idx is None or second_idx is None:
