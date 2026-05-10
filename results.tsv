@@ -151,3 +151,5 @@ dfd85ab	qwen36-o200k-100k-screen	0.451680	0.451680	2.693335	6.3	discard	high-mar
 2c77200	qwen-mistral-gemma-100k-screen	0.459920	0.464420	2.673779	6.3	discard	single strongest variable emission is CER-neutral on three-pair screen with only tiny BPB gain
 1406268	core-100k-gemma	0.456364	0.464420	2.649934	6.3	keep	free local-pair variable emission gives a tiny non-same-tokenizer 100k mean CER and BPB gain
 16a9052	qwen36-o200k-100k-oracle-audit	0.451460	0.451460	2.694996	6.3	diagnostic	union/graph top64 singleton oracle reaches 0.353360 CER, a 0.098100 gain; global candidate selection is the active bottleneck
+retok-audit	qwen36-o200k-100k-retok-objective-audit	0.451460	0.451460	2.694996	6.3	diagnostic	retokenized LM aligns with oracle mappings: graph_top64 oracle CER 0.353360 with backoff_nll 6.648255 versus baseline 6.666507
+retok-audit	qwen36-o200k-100k-retok-move-audit	0.451460	0.451460	2.694996	6.3	discard	retokenized window deltas have decent AUC but insufficient top precision: focused head audit best top100 precision 0.10 below 0.20 gate

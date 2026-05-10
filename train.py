@@ -40,6 +40,12 @@ SEED = int(os.environ.get("DETOK_SEED", DEFAULT_SEED))
 ENABLE_DIAGNOSTICS = os.environ.get("DETOK_DIAGNOSTICS", "1") != "0"
 ORACLE_AUDIT = os.environ.get("DETOK_ORACLE_AUDIT", "0") == "1"
 ORACLE_AUDIT_TYPES = int(os.environ.get("DETOK_ORACLE_AUDIT_TYPES", "8192"))
+RETOK_OBJECTIVE_AUDIT = os.environ.get("DETOK_RETOK_OBJECTIVE_AUDIT", "0") == "1"
+RETOK_MOVE_AUDIT_TYPES = int(os.environ.get("DETOK_RETOK_MOVE_AUDIT_TYPES", "2048"))
+RETOK_MOVE_AUDIT_TOPK = int(os.environ.get("DETOK_RETOK_MOVE_AUDIT_TOPK", "16"))
+RETOK_WINDOW_RADIUS = int(os.environ.get("DETOK_RETOK_WINDOW_RADIUS", "12"))
+RETOK_MAX_OCCURRENCES = int(os.environ.get("DETOK_RETOK_MAX_OCCURRENCES", "256"))
+RETOK_MOVE_AUDIT_MAX_WINDOWS = int(os.environ.get("DETOK_RETOK_MOVE_AUDIT_MAX_WINDOWS", "200000"))
 
 TOP_TOKENS = 50_000
 ANCHORS = 8_192
@@ -1234,12 +1240,374 @@ def graph_candidate_pool(edges: list[tuple[float, int, int]], per_token: int = 6
     return pool
 
 
+def graph_score_pool(edges: list[tuple[float, int, int]], per_token: int = 64) -> dict[int, list[tuple[int, float]]]:
+    pool: dict[int, list[tuple[int, float]]] = {}
+    seen: dict[int, set[int]] = {}
+    for score, c, p in edges:
+        c_int = int(c)
+        p_int = int(p)
+        bucket = pool.setdefault(c_int, [])
+        if len(bucket) >= per_token:
+            continue
+        seen_bucket = seen.setdefault(c_int, set())
+        if p_int in seen_bucket:
+            continue
+        bucket.append((p_int, float(score)))
+        seen_bucket.add(p_int)
+    return pool
+
+
 def union_pools(*pools: dict[int, set[int]]) -> dict[int, set[int]]:
     merged: dict[int, set[int]] = {}
     for pool in pools:
         for c, values in pool.items():
             merged.setdefault(int(c), set()).update(map(int, values))
     return merged
+
+
+class SparseTokenBigramLM:
+    def __init__(self, ref_ids: np.ndarray, vocab_size: int, alpha: float = BIGRAM_REFINE_ALPHA):
+        self.vocab_size = int(vocab_size)
+        self.alpha = float(alpha)
+        ref = ref_ids.astype(np.int64, copy=False)
+        self.unigram = counts(ref, self.vocab_size).astype(np.float64)
+        self.row_counts = np.bincount(ref[:-1], minlength=self.vocab_size).astype(np.float64)
+        self.total_tokens = float(len(ref))
+        print("building_sparse_retok_lm_pairs", flush=True)
+        keys = ref[:-1].astype(np.int64, copy=False) * self.vocab_size + ref[1:].astype(np.int64, copy=False)
+        self.keys, pair_counts = np.unique(keys, return_counts=True)
+        self.pair_counts = pair_counts.astype(np.float64, copy=False)
+        print(f"sparse_retok_lm_pairs={len(self.keys)}", flush=True)
+
+    def _pair_counts(self, keys: np.ndarray) -> np.ndarray:
+        idx = np.searchsorted(self.keys, keys)
+        valid = (idx < len(self.keys)) & (self.keys[idx.clip(max=max(0, len(self.keys) - 1))] == keys)
+        out = np.zeros(len(keys), dtype=np.float64)
+        if bool(valid.any()):
+            out[valid] = self.pair_counts[idx[valid]]
+        return out
+
+    def score_ids(self, ids: list[int] | np.ndarray) -> dict[str, float]:
+        arr = np.asarray(ids, dtype=np.int64)
+        if len(arr) < 2:
+            return {
+                "bigram": 0.0,
+                "backoff": 0.0,
+                "bigram_nll": 0.0,
+                "backoff_nll": 0.0,
+                "pairs": 0.0,
+            }
+        prev = arr[:-1]
+        nxt = arr[1:]
+        mask = (prev >= 0) & (prev < self.vocab_size) & (nxt >= 0) & (nxt < self.vocab_size)
+        if not bool(mask.any()):
+            return {
+                "bigram": 0.0,
+                "backoff": 0.0,
+                "bigram_nll": 0.0,
+                "backoff_nll": 0.0,
+                "pairs": 0.0,
+            }
+        prev = prev[mask]
+        nxt = nxt[mask]
+        keys = prev * self.vocab_size + nxt
+        pair_counts = self._pair_counts(keys)
+        denom = self.row_counts[prev] + self.alpha * self.vocab_size
+        bigram_prob = (pair_counts + self.alpha) / np.maximum(denom, 1.0)
+        bigram_score = float(np.log(bigram_prob).sum())
+
+        unigram_prob = (self.unigram[nxt] + self.alpha) / (self.total_tokens + self.alpha * self.vocab_size)
+        lam = self.row_counts[prev] / (self.row_counts[prev] + BIGRAM_UNIGRAM_BACKOFF_TAU)
+        backoff_prob = lam * bigram_prob + (1.0 - lam) * unigram_prob
+        backoff_score = float(np.log(np.maximum(backoff_prob, 1.0e-30)).sum())
+        pairs = float(len(prev))
+        return {
+            "bigram": bigram_score,
+            "backoff": backoff_score,
+            "bigram_nll": -bigram_score / max(1.0, pairs),
+            "backoff_nll": -backoff_score / max(1.0, pairs),
+            "pairs": pairs,
+        }
+
+
+def auc_from_scores(labels: list[int], scores: list[float]) -> float:
+    if not labels or len(labels) != len(scores):
+        return 0.5
+    label_arr = np.asarray(labels, dtype=np.int32)
+    score_arr = np.asarray(scores, dtype=np.float64)
+    pos = int(label_arr.sum())
+    neg = int(len(label_arr) - pos)
+    if pos == 0 or neg == 0:
+        return 0.5
+    order = np.argsort(score_arr)
+    ranks = np.empty(len(score_arr), dtype=np.float64)
+    sorted_scores = score_arr[order]
+    start = 0
+    while start < len(score_arr):
+        stop = start + 1
+        while stop < len(score_arr) and sorted_scores[stop] == sorted_scores[start]:
+            stop += 1
+        avg_rank = (start + stop + 1) / 2.0
+        ranks[order[start:stop]] = avg_rank
+        start = stop
+    pos_rank_sum = float(ranks[label_arr == 1].sum())
+    return (pos_rank_sum - pos * (pos + 1) / 2.0) / max(1.0, float(pos * neg))
+
+
+def top_precision(labels: list[int], scores: list[float], k: int) -> float:
+    if not labels or k <= 0:
+        return 0.0
+    label_arr = np.asarray(labels, dtype=np.int32)
+    score_arr = np.asarray(scores, dtype=np.float64)
+    take = min(k, len(label_arr))
+    order = np.argsort(-score_arr)[:take]
+    return float(label_arr[order].mean()) if take else 0.0
+
+
+def current_piece_for_cipher(
+    cipher_id: int,
+    mapping: np.ndarray,
+    emissions: dict[int, tuple[int, ...]],
+    target_adapter,
+    cache: dict[int, str],
+) -> str:
+    c_int = int(cipher_id)
+    cached = cache.get(c_int)
+    if cached is not None:
+        return cached
+    emission = emissions.get(c_int)
+    if emission is None:
+        piece = target_adapter.decode([int(mapping[c_int])])
+    else:
+        piece = target_adapter.decode([int(p) for p in emission])
+    cache[c_int] = piece
+    return piece
+
+
+def target_piece(target_id: int, target_adapter, cache: dict[int, str]) -> str:
+    p_int = int(target_id)
+    cached = cache.get(p_int)
+    if cached is not None:
+        return cached
+    piece = target_adapter.decode([p_int])
+    cache[p_int] = piece
+    return piece
+
+
+def retokenized_mapping_rows(
+    task,
+    mapping: np.ndarray,
+    emissions: dict[int, tuple[int, ...]],
+    truth: dict[int, int],
+    graph_pool: dict[int, set[int]],
+    focus: np.ndarray,
+    lm: SparseTokenBigramLM,
+) -> list[dict[str, float | int | str]]:
+    sample_cipher = task.cipher_ids[:SAMPLE_TOKENS]
+    focus_set = set(map(int, focus))
+    graph_overrides = {
+        c: true_p
+        for c, true_p in truth.items()
+        if c in focus_set and true_p in graph_pool.get(c, set())
+    }
+    all_overrides = {c: true_p for c, true_p in truth.items() if c in focus_set}
+    specs = [
+        ("current_baseline", decode_with_variable_emissions(sample_cipher, mapping, emissions, task.target_adapter)),
+        (
+            "graph_top64_oracle",
+            decode_with_singleton_overrides(sample_cipher, mapping, emissions, graph_overrides, task.target_adapter),
+        ),
+        (
+            f"true_singleton_top{len(focus)}",
+            decode_with_singleton_overrides(sample_cipher, mapping, emissions, all_overrides, task.target_adapter),
+        ),
+    ]
+    rows: list[dict[str, float | int | str]] = []
+    for name, text in specs:
+        retok_ids = task.target_adapter.encode(text)
+        metrics = evaluate_recovery(task, text, SAMPLE_TOKENS)
+        score = lm.score_ids(retok_ids)
+        rows.append(
+            {
+                "name": name,
+                "cer50k": float(metrics["cer50k"]),
+                "byte_lm_bpb": float(metrics["byte_lm_bpb"]),
+                "retok_tokens": int(len(retok_ids)),
+                "retok_bigram": float(score["bigram"]),
+                "retok_backoff": float(score["backoff"]),
+                "retok_bigram_nll": float(score["bigram_nll"]),
+                "retok_backoff_nll": float(score["backoff_nll"]),
+            }
+        )
+    return rows
+
+
+def choose_occurrence_sample(positions: list[int], limit: int) -> list[int]:
+    if len(positions) <= limit:
+        return positions
+    idx = np.linspace(0, len(positions) - 1, limit, dtype=np.int64)
+    return [positions[int(i)] for i in idx]
+
+
+def retok_move_level_audit(
+    task,
+    mapping: np.ndarray,
+    emissions: dict[int, tuple[int, ...]],
+    truth: dict[int, int],
+    graph_scores: dict[int, list[tuple[int, float]]],
+    lm: SparseTokenBigramLM,
+) -> dict[str, object]:
+    sample_cipher = task.cipher_ids[:SAMPLE_TOKENS]
+    focus = [int(c) for c in LAST_C_FOCUS[: min(RETOK_MOVE_AUDIT_TYPES, len(LAST_C_FOCUS))]]
+    focus_set = set(focus)
+    positions_by_c: dict[int, list[int]] = {c: [] for c in focus}
+    for pos, c in enumerate(sample_cipher):
+        c_int = int(c)
+        if c_int in focus_set:
+            positions_by_c[c_int].append(pos)
+
+    moves: list[tuple[int, int, int, float, int]] = []
+    for c in focus:
+        true_p = truth.get(c)
+        if true_p is None:
+            continue
+        current_p = int(mapping[c])
+        for rank, (p, score) in enumerate(graph_scores.get(c, [])[:RETOK_MOVE_AUDIT_TOPK], start=1):
+            if int(p) == current_p:
+                continue
+            moves.append((c, int(p), rank, float(score), 1 if int(p) == true_p else 0))
+    if not moves:
+        return {}
+
+    per_move_occ = max(1, min(RETOK_MAX_OCCURRENCES, RETOK_MOVE_AUDIT_MAX_WINDOWS // max(1, len(moves))))
+    current_piece_cache: dict[int, str] = {}
+    target_piece_cache: dict[int, str] = {}
+    current_graph_score = {c: {p: score for p, score in candidates} for c, candidates in graph_scores.items()}
+    labels: list[int] = []
+    feature_scores: dict[str, list[float]] = {
+        "retok_bigram_delta": [],
+        "retok_backoff_delta": [],
+        "retok_bigram_nll_delta": [],
+        "retok_backoff_nll_delta": [],
+        "byte_bpb_delta": [],
+        "positive_fraction": [],
+        "graph_delta": [],
+        "combined": [],
+    }
+
+    for c, p, rank, graph_score, label in moves:
+        positions = positions_by_c.get(c, [])
+        if not positions:
+            continue
+        sampled_positions = choose_occurrence_sample(positions, per_move_occ)
+        candidate_piece = target_piece(p, task.target_adapter, target_piece_cache)
+        old_texts: list[str] = []
+        new_texts: list[str] = []
+        for pos in sampled_positions:
+            start = max(0, pos - RETOK_WINDOW_RADIUS)
+            stop = min(len(sample_cipher), pos + RETOK_WINDOW_RADIUS + 1)
+            old_parts: list[str] = []
+            new_parts: list[str] = []
+            for j in range(start, stop):
+                c_j = int(sample_cipher[j])
+                old_piece = current_piece_for_cipher(c_j, mapping, emissions, task.target_adapter, current_piece_cache)
+                old_parts.append(old_piece)
+                new_parts.append(candidate_piece if j == pos else old_piece)
+            old_texts.append("".join(old_parts))
+            new_texts.append("".join(new_parts))
+
+        old_ids_batch = task.target_adapter.encode_batch(old_texts)
+        new_ids_batch = task.target_adapter.encode_batch(new_texts)
+        bigram_deltas: list[float] = []
+        backoff_deltas: list[float] = []
+        bigram_nll_deltas: list[float] = []
+        backoff_nll_deltas: list[float] = []
+        byte_deltas: list[float] = []
+        for old_text, new_text, old_ids, new_ids in zip(old_texts, new_texts, old_ids_batch, new_ids_batch):
+            old_score = lm.score_ids(old_ids)
+            new_score = lm.score_ids(new_ids)
+            bigram_deltas.append(float(new_score["bigram"] - old_score["bigram"]))
+            backoff_deltas.append(float(new_score["backoff"] - old_score["backoff"]))
+            bigram_nll_deltas.append(float(old_score["bigram_nll"] - new_score["bigram_nll"]))
+            backoff_nll_deltas.append(float(old_score["backoff_nll"] - new_score["backoff_nll"]))
+            old_bpb = task.byte_lm.bits_per_byte(old_text.encode("utf-8", errors="replace"))
+            new_bpb = task.byte_lm.bits_per_byte(new_text.encode("utf-8", errors="replace"))
+            byte_deltas.append(float(old_bpb - new_bpb))
+
+        median_bigram = float(np.median(np.asarray(bigram_deltas, dtype=np.float64)))
+        median_backoff = float(np.median(np.asarray(backoff_deltas, dtype=np.float64)))
+        median_bigram_nll = float(np.median(np.asarray(bigram_nll_deltas, dtype=np.float64)))
+        median_backoff_nll = float(np.median(np.asarray(backoff_nll_deltas, dtype=np.float64)))
+        median_byte = float(np.median(np.asarray(byte_deltas, dtype=np.float64)))
+        positive_fraction = float(np.mean(np.asarray(backoff_nll_deltas, dtype=np.float64) > 0.0))
+        current_score = current_graph_score.get(c, {}).get(int(mapping[c]), 0.0)
+        graph_delta = float(graph_score - current_score)
+        combined = median_backoff_nll + 0.25 * median_bigram_nll + 0.10 * median_byte + 0.01 * graph_delta
+
+        labels.append(label)
+        feature_scores["retok_bigram_delta"].append(median_bigram)
+        feature_scores["retok_backoff_delta"].append(median_backoff)
+        feature_scores["retok_bigram_nll_delta"].append(median_bigram_nll)
+        feature_scores["retok_backoff_nll_delta"].append(median_backoff_nll)
+        feature_scores["byte_bpb_delta"].append(median_byte)
+        feature_scores["positive_fraction"].append(positive_fraction)
+        feature_scores["graph_delta"].append(graph_delta)
+        feature_scores["combined"].append(combined)
+
+    feature_report: dict[str, dict[str, float]] = {}
+    for name, values in feature_scores.items():
+        feature_report[name] = {
+            "auc": auc_from_scores(labels, values),
+            "top100_precision": top_precision(labels, values, 100),
+            "top500_precision": top_precision(labels, values, 500),
+            "top1000_precision": top_precision(labels, values, 1000),
+        }
+    report = {
+        "moves": len(labels),
+        "positive_moves": int(sum(labels)),
+        "per_move_occurrences": int(per_move_occ),
+        "max_windows": int(RETOK_MOVE_AUDIT_MAX_WINDOWS),
+        "features": feature_report,
+    }
+    print("retok_move_audit:", json.dumps(report, sort_keys=True), flush=True)
+    return report
+
+
+def retokenized_objective_audit(
+    task,
+    mapping: np.ndarray,
+    emissions: dict[int, tuple[int, ...]],
+) -> dict[str, object]:
+    focus = LAST_C_FOCUS[: min(ORACLE_AUDIT_TYPES, len(LAST_C_FOCUS))]
+    if len(focus) == 0:
+        return {}
+    inv = inverse_permutation(task.perm)
+    truth: dict[int, int] = {}
+    for c in focus:
+        true_p, _piece, _cls = singleton_truth_for_cipher(task, int(c), inv)
+        if true_p is not None:
+            truth[int(c)] = int(true_p)
+
+    graph_pool = graph_candidate_pool(LAST_FINAL_EDGES, TORCH_TOPK)
+    graph_scores = graph_score_pool(LAST_FINAL_EDGES, TORCH_TOPK)
+    lm = SparseTokenBigramLM(task.ref_ids, task.target_adapter.spec.vocab_size)
+    rows = retokenized_mapping_rows(task, mapping, emissions, truth, graph_pool, focus, lm)
+    print("retok_objective_rows:", flush=True)
+    for row in rows:
+        print(
+            f"  {row['name']}: cer={row['cer50k']:.6f} bpb={row['byte_lm_bpb']:.6f} "
+            f"retok_tokens={row['retok_tokens']} retok_bigram={row['retok_bigram']:.1f} "
+            f"retok_backoff={row['retok_backoff']:.1f} "
+            f"bigram_nll={row['retok_bigram_nll']:.6f} backoff_nll={row['retok_backoff_nll']:.6f}",
+            flush=True,
+        )
+    move_report = retok_move_level_audit(task, mapping, emissions, truth, graph_scores, lm)
+    return {
+        "focus_types": int(len(focus)),
+        "singleton_truth_types": int(len(truth)),
+        "rows": rows,
+        "move_audit": move_report,
+    }
 
 
 def oracle_audit(task, mapping: np.ndarray, emissions: dict[int, tuple[int, ...]]) -> dict[str, object]:
@@ -1390,6 +1758,9 @@ def main() -> None:
     oracle_report: dict[str, object] = {}
     if ORACLE_AUDIT:
         oracle_report = oracle_audit(task, mapping, emissions)
+    retok_report: dict[str, object] = {}
+    if RETOK_OBJECTIVE_AUDIT:
+        retok_report = retokenized_objective_audit(task, mapping, emissions)
 
     out_dir = CACHE_DIR / "runs"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1415,6 +1786,7 @@ def main() -> None:
         "variable_emission_repair": VARIABLE_EMISSION_REPAIR,
         "variable_emissions": len(emissions),
         "oracle_audit": oracle_report,
+        "retokenized_objective_audit": retok_report,
         "diagnostics": diagnostics,
         "elapsed_seconds": time.time() - t0,
         "metrics": metrics,
