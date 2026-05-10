@@ -38,6 +38,8 @@ REFERENCE_TOKENS = int(os.environ.get("DETOK_REFERENCE_TOKENS", DEFAULT_REFERENC
 SAMPLE_TOKENS = int(os.environ.get("DETOK_SAMPLE_TOKENS", DEFAULT_SAMPLE_TOKENS))
 SEED = int(os.environ.get("DETOK_SEED", DEFAULT_SEED))
 ENABLE_DIAGNOSTICS = os.environ.get("DETOK_DIAGNOSTICS", "1") != "0"
+ORACLE_AUDIT = os.environ.get("DETOK_ORACLE_AUDIT", "0") == "1"
+ORACLE_AUDIT_TYPES = int(os.environ.get("DETOK_ORACLE_AUDIT_TYPES", "8192"))
 
 TOP_TOKENS = 50_000
 ANCHORS = 8_192
@@ -95,6 +97,12 @@ VARIABLE_EMISSION_MIN_COUNT = 10
 VARIABLE_EMISSION_MIN_GAIN_PER_OCC = 5.00
 VARIABLE_EMISSION_MAX_ACCEPTED = 2
 VARIABLE_EMISSION_FREE_LOCAL_PAIRS = True
+
+LAST_FINAL_EDGES: list[tuple[float, int, int]] = []
+LAST_C_FOCUS: np.ndarray = np.empty(0, dtype=np.int64)
+LAST_BIGRAM_CANDIDATES: dict[int, set[int]] = {}
+LAST_TAIL_CANDIDATES: dict[int, set[int]] = {}
+LAST_OWNER_CANDIDATES: dict[int, set[int]] = {}
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -328,6 +336,8 @@ def refine_with_bigram_objective(
     target_vocab_size: int,
     p_counts: np.ndarray,
 ) -> np.ndarray:
+    global LAST_BIGRAM_CANDIDATES
+    LAST_BIGRAM_CANDIDATES = {}
     if not BIGRAM_OBJECTIVE_REFINE:
         return mapping
     token_budget = (
@@ -394,6 +404,7 @@ def refine_with_bigram_objective(
             continue
         seen_proposals.add(key)
         proposals.append(key)
+        LAST_BIGRAM_CANDIDATES.setdefault(int(c), set()).add(int(p))
         if len(proposals) >= BIGRAM_REFINE_MAX_PROPOSALS:
             break
 
@@ -454,6 +465,8 @@ def tail_unary_repair(
     edges: list[tuple[float, int, int]],
     target_vocab_size: int,
 ) -> np.ndarray:
+    global LAST_TAIL_CANDIDATES
+    LAST_TAIL_CANDIDATES = {}
     if len(cipher_ids) > TAIL_REPAIR_MAX_TOKENS or TAIL_REPAIR_NODES <= 0:
         return mapping
     start = min(BIGRAM_REFINE_TOKENS, len(c_focus))
@@ -489,6 +502,7 @@ def tail_unary_repair(
         if p_int < 0 or p_int >= target_vocab_size or p_int in cand:
             continue
         cand.append(p_int)
+    LAST_TAIL_CANDIDATES = {int(c): set(map(int, cand)) for c, cand in candidates_by_c.items()}
 
     candidate_p: list[int] = []
     candidate_pos: dict[int, int] = {}
@@ -565,6 +579,8 @@ def external_owner_repair(
     edges: list[tuple[float, int, int]],
     target_vocab_size: int,
 ) -> np.ndarray:
+    global LAST_OWNER_CANDIDATES
+    LAST_OWNER_CANDIDATES = {}
     if not EXTERNAL_OWNER_REPAIR or len(cipher_ids) > EXTERNAL_OWNER_MAX_TOKENS:
         return mapping
     c_nodes = c_focus[: min(len(c_focus), EXTERNAL_OWNER_NODES)]
@@ -603,6 +619,9 @@ def external_owner_repair(
         candidates.append((int(c), int(p), int(owner)))
     if not candidates:
         return mapping
+    for c, p, owner in candidates:
+        LAST_OWNER_CANDIDATES.setdefault(int(c), set()).add(int(p))
+        LAST_OWNER_CANDIDATES.setdefault(int(owner), set()).add(int(mapping[int(c)]))
 
     context_c: list[int] = []
     context_p: list[int] = []
@@ -714,6 +733,7 @@ def align_shuffled(
     ref_ids: np.ndarray,
     target_vocab_size: int,
 ) -> np.ndarray:
+    global LAST_C_FOCUS, LAST_FINAL_EDGES
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device: {device}", flush=True)
     candidate_window = effective_candidate_window(len(cipher_ids))
@@ -729,6 +749,7 @@ def align_shuffled(
     p_order_all = np.argsort(-p_counts)
     c_focus = c_order_all[: min(TOP_TOKENS, np.count_nonzero(c_counts))].astype(np.int64)
     p_focus = p_order_all[: min(TOP_TOKENS, np.count_nonzero(p_counts))].astype(np.int64)
+    LAST_C_FOCUS = c_focus.copy()
 
     mapping = np.zeros(max(len(c_counts), target_vocab_size), dtype=np.int64)
     init = c_order_all[: len(p_order_all)]
@@ -798,6 +819,8 @@ def align_shuffled(
                 torch.cuda.empty_cache()
 
         edges.sort(reverse=True)
+        if round_idx == rounds - 1:
+            LAST_FINAL_EDGES = list(edges)
         used_c: set[int] = set()
         used_p: set[int] = set()
         assigned_p_by_c: dict[int, int] = {}
@@ -1145,6 +1168,197 @@ def decode_with_variable_emissions(
     return target_adapter.decode(out)
 
 
+def inverse_permutation(perm: np.ndarray) -> np.ndarray:
+    inv = np.full(int(perm.max(initial=0)) + 1, -1, dtype=np.int64)
+    inv[perm.astype(np.int64, copy=False)] = np.arange(len(perm), dtype=np.int64)
+    return inv
+
+
+def singleton_truth_for_cipher(task, cipher_id: int, inv_perm: np.ndarray) -> tuple[int | None, str, str]:
+    if cipher_id >= len(inv_perm):
+        return None, "", "other"
+    source_id = int(inv_perm[int(cipher_id)])
+    if source_id < 0:
+        return None, "", "other"
+    piece = task.source_adapter.decode([source_id])
+    target_ids = task.target_adapter.encode(piece)
+    if len(target_ids) != 1:
+        return None, piece, token_class(piece)
+    return int(target_ids[0]), piece, token_class(piece)
+
+
+def token_class(piece: str) -> str:
+    if not piece:
+        return "other"
+    if piece.isspace():
+        return "whitespace"
+    stripped = piece.strip()
+    if stripped and all(ch.isdigit() for ch in stripped):
+        return "digit"
+    if any(ch.isalnum() for ch in piece):
+        return "alnum"
+    if all((ch.isprintable() or ch.isspace()) for ch in piece):
+        return "punctuation"
+    return "other"
+
+
+def decode_with_singleton_overrides(
+    cipher_ids: np.ndarray,
+    mapping: np.ndarray,
+    emissions: dict[int, tuple[int, ...]],
+    overrides: dict[int, int],
+    target_adapter,
+) -> str:
+    out: list[int] = []
+    for c in cipher_ids:
+        c_int = int(c)
+        override = overrides.get(c_int)
+        if override is not None:
+            out.append(int(override))
+            continue
+        emission = emissions.get(c_int)
+        if emission is None:
+            out.append(int(mapping[c_int]))
+        else:
+            out.extend(int(p) for p in emission)
+    return target_adapter.decode(out)
+
+
+def graph_candidate_pool(edges: list[tuple[float, int, int]], per_token: int = 64) -> dict[int, set[int]]:
+    pool: dict[int, set[int]] = {}
+    for _score, c, p in edges:
+        bucket = pool.setdefault(int(c), set())
+        if len(bucket) >= per_token:
+            continue
+        bucket.add(int(p))
+    return pool
+
+
+def union_pools(*pools: dict[int, set[int]]) -> dict[int, set[int]]:
+    merged: dict[int, set[int]] = {}
+    for pool in pools:
+        for c, values in pool.items():
+            merged.setdefault(int(c), set()).update(map(int, values))
+    return merged
+
+
+def oracle_audit(task, mapping: np.ndarray, emissions: dict[int, tuple[int, ...]]) -> dict[str, object]:
+    sample_cipher = task.cipher_ids[:SAMPLE_TOKENS]
+    focus = LAST_C_FOCUS[: min(ORACLE_AUDIT_TYPES, len(LAST_C_FOCUS))]
+    if len(focus) == 0:
+        return {}
+
+    inv = inverse_permutation(task.perm)
+    c_counts = counts(task.cipher_ids, int(max(len(mapping), int(task.cipher_ids.max(initial=0)) + 1)))
+    truth: dict[int, int] = {}
+    classes: dict[int, str] = {}
+    for c in focus:
+        c_int = int(c)
+        true_p, _piece, cls = singleton_truth_for_cipher(task, c_int, inv)
+        classes[c_int] = cls
+        if true_p is not None:
+            truth[c_int] = true_p
+
+    baseline_text = decode_with_variable_emissions(sample_cipher, mapping, emissions, task.target_adapter)
+    baseline_metrics = evaluate_recovery(task, baseline_text, SAMPLE_TOKENS)
+    baseline_cer = float(baseline_metrics["cer50k"])
+
+    graph_pool = graph_candidate_pool(LAST_FINAL_EDGES, TORCH_TOPK)
+    bigram_pool = {int(c): set(map(int, values)) for c, values in LAST_BIGRAM_CANDIDATES.items()}
+    tail_pool = {int(c): set(map(int, values)) for c, values in LAST_TAIL_CANDIDATES.items()}
+    owner_pool = {int(c): set(map(int, values)) for c, values in LAST_OWNER_CANDIDATES.items()}
+    union_pool = union_pools(graph_pool, bigram_pool, tail_pool, owner_pool)
+
+    focus_set = set(map(int, focus))
+    sample_mass_den = max(1, len(sample_cipher))
+
+    def run_pool(name: str, pool: dict[int, set[int]], allowed: set[int] | None = None) -> dict[str, float | int | str]:
+        allowed_set = focus_set if allowed is None else allowed
+        overrides = {
+            c: true_p
+            for c, true_p in truth.items()
+            if c in allowed_set and true_p in pool.get(c, set())
+        }
+        changed = {
+            c: true_p
+            for c, true_p in overrides.items()
+            if int(mapping[c]) != int(true_p) or c in emissions
+        }
+        text = decode_with_singleton_overrides(sample_cipher, mapping, emissions, overrides, task.target_adapter)
+        metrics = evaluate_recovery(task, text, SAMPLE_TOKENS)
+        mass = float(sum(int(c_counts[c]) for c in overrides)) / sample_mass_den
+        return {
+            "name": name,
+            "cer50k": float(metrics["cer50k"]),
+            "gain": baseline_cer - float(metrics["cer50k"]),
+            "eligible_types": len(overrides),
+            "changed_types": len(changed),
+            "eligible_mass": mass,
+        }
+
+    rows: list[dict[str, float | int | str]] = [
+        {
+            "name": "current_mapping",
+            "cer50k": baseline_cer,
+            "gain": 0.0,
+            "eligible_types": 0,
+            "changed_types": 0,
+            "eligible_mass": 0.0,
+        },
+        run_pool("graph_top64_oracle", graph_pool),
+        run_pool("bigram_swap_pool_oracle", bigram_pool),
+        run_pool("tail_pool_oracle", tail_pool),
+        run_pool("owner_pool_oracle", owner_pool),
+        run_pool("union_pool_oracle", union_pool),
+    ]
+
+    for limit in (128, 512, 2048, 4096, min(8192, len(focus))):
+        allowed = set(map(int, focus[:limit]))
+        all_truth_pool = {c: {p} for c, p in truth.items()}
+        rows.append(run_pool(f"true_singleton_top{limit}", all_truth_pool, allowed))
+
+    if len(focus) > 4096:
+        tail_allowed = set(map(int, focus[4096 : min(8192, len(focus))]))
+        rows.append(run_pool("union_tail_4096_8192", union_pool, tail_allowed))
+
+    for cls in ("alnum", "punctuation", "whitespace", "digit"):
+        allowed = {c for c in focus_set if classes.get(c) == cls}
+        rows.append(run_pool(f"union_class_{cls}", union_pool, allowed))
+
+    owner_allowed = set(LAST_OWNER_CANDIDATES.keys()) & focus_set
+    rows.append(run_pool("union_owner_conflict_types", union_pool, owner_allowed))
+
+    not_in_p_nodes = {
+        c
+        for c, true_p in truth.items()
+        if true_p in graph_pool.get(c, set()) and true_p not in bigram_pool.get(c, set())
+    }
+    rows.append(run_pool("union_graph_true_not_in_bigram_pool", union_pool, not_in_p_nodes))
+
+    singleton_types = len(truth)
+    current_correct = sum(1 for c, true_p in truth.items() if int(mapping[c]) == int(true_p) and c not in emissions)
+    graph_recall = sum(1 for c, true_p in truth.items() if true_p in graph_pool.get(c, set()))
+    union_recall = sum(1 for c, true_p in truth.items() if true_p in union_pool.get(c, set()))
+    audit = {
+        "baseline_cer50k": baseline_cer,
+        "focus_types": int(len(focus)),
+        "singleton_truth_types": singleton_types,
+        "current_top1_type_acc": current_correct / max(1, singleton_types),
+        "graph_top64_type_recall": graph_recall / max(1, singleton_types),
+        "union_type_recall": union_recall / max(1, singleton_types),
+        "rows": rows,
+    }
+    print("oracle_audit_summary:", json.dumps({k: v for k, v in audit.items() if k != "rows"}, sort_keys=True), flush=True)
+    print("oracle_audit_rows:", flush=True)
+    for row in rows:
+        print(
+            f"  {row['name']}: cer={row['cer50k']:.6f} gain={row['gain']:.6f} "
+            f"types={row['eligible_types']} changed={row['changed_types']} mass={row['eligible_mass']:.4f}",
+            flush=True,
+        )
+    return audit
+
+
 def main() -> None:
     t0 = time.time()
     task = load_task(
@@ -1173,6 +1387,9 @@ def main() -> None:
         original_sample = task.source_adapter.decode(task.secret_ids[:SAMPLE_TOKENS].astype(int).tolist())
         diagnostics = error_breakdown(original_sample, recovered_sample)
         print(f"error_breakdown: {json.dumps(diagnostics, sort_keys=True)}", flush=True)
+    oracle_report: dict[str, object] = {}
+    if ORACLE_AUDIT:
+        oracle_report = oracle_audit(task, mapping, emissions)
 
     out_dir = CACHE_DIR / "runs"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1197,6 +1414,7 @@ def main() -> None:
         "learn_skip_weight": LEARN_SKIP_WEIGHT,
         "variable_emission_repair": VARIABLE_EMISSION_REPAIR,
         "variable_emissions": len(emissions),
+        "oracle_audit": oracle_report,
         "diagnostics": diagnostics,
         "elapsed_seconds": time.time() - t0,
         "metrics": metrics,
