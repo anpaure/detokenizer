@@ -68,6 +68,8 @@ BIGRAM_REFINE_SKIP_WEIGHT = 0.4
 BIGRAM_REFINE_SKIP_MIN_TOKENS = 1_000_000
 BIGRAM_REFINE_SKIP_MAX_TOKENS = 1_000_000
 BIGRAM_REFINE_ALPHA = 0.05
+BIGRAM_UNIGRAM_BACKOFF = True
+BIGRAM_UNIGRAM_BACKOFF_TAU = 100.0
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -275,6 +277,7 @@ def refine_with_bigram_objective(
     c_focus: np.ndarray,
     edges: list[tuple[float, int, int]],
     target_vocab_size: int,
+    p_counts: np.ndarray,
 ) -> np.ndarray:
     if not BIGRAM_OBJECTIVE_REFINE:
         return mapping
@@ -309,7 +312,14 @@ def refine_with_bigram_objective(
         c_big += BIGRAM_REFINE_SKIP_WEIGHT * dense_bigram_counts(cipher_ids, c_nodes, len(mapping), offset=2)
         p_big += BIGRAM_REFINE_SKIP_WEIGHT * dense_bigram_counts(ref_ids, p_nodes, target_vocab_size, offset=2)
     row_totals = p_big.sum(axis=1, keepdims=True)
-    p_log = np.log((p_big + BIGRAM_REFINE_ALPHA) / (row_totals + BIGRAM_REFINE_ALPHA * k)).astype(np.float32)
+    block_probs = (p_big + BIGRAM_REFINE_ALPHA) / (row_totals + BIGRAM_REFINE_ALPHA * k)
+    if BIGRAM_UNIGRAM_BACKOFF:
+        unigram = p_counts[p_nodes].astype(np.float32)
+        unigram = (unigram + BIGRAM_REFINE_ALPHA) / (float(unigram.sum()) + BIGRAM_REFINE_ALPHA * k)
+        lam = row_totals / (row_totals + BIGRAM_UNIGRAM_BACKOFF_TAU)
+        block_probs = lam * block_probs + (1.0 - lam) * unigram[None, :]
+        print(f"bigram_unigram_backoff_tau={BIGRAM_UNIGRAM_BACKOFF_TAU}", flush=True)
+    p_log = np.log(block_probs).astype(np.float32)
     perm = np.arange(k, dtype=np.int32)
     owner = np.arange(k, dtype=np.int32)
     c_to_i = {int(c): i for i, c in enumerate(c_nodes)}
@@ -510,6 +520,7 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
                 c_focus,
                 edges,
                 target_vocab_size,
+                p_counts,
             )
         if use_dynamic_anchors and len(assigned_scores) >= 64:
             assigned_scores.sort(reverse=True)
