@@ -163,3 +163,4 @@ c12cfb8	qwen36-o200k-100k-screen	0.459980	0.459980	2.688194	101.0	discard	Sinkho
 23d1be1	qwen-mistral-gemma-100k-screen	0.459907	0.464640	2.672538	126.5	discard	format-only single string candidate replacement still overfits Mistral/Gemma despite Qwen gain
 7868a16	qwen36-o200k-100k-screen	0.451320	0.451320	2.694811	113.5	diagnostic	LCB-gated extra bigram pass accepts only two stable swaps and slightly improves hard Qwen screen
 7868a16	core-100k-gemma	0.456320	0.464420	2.649429	6.3	keep	LCB-gated extra bigram pass accepts a tiny stable subset of overfit fifth-pass swaps and slightly improves 100k Gemma-core mean and BPB
+cce4022	qwen36-o200k-100k-screen	0.456560	0.456560	2.719339	116.8	discard	LCB-gated tail repair accepted only 27 of 830 candidate changes and underfit hard Qwen screen
