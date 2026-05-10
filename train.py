@@ -9,7 +9,9 @@ cer50k.
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 import time
 from pathlib import Path
 
@@ -76,6 +78,13 @@ RETOK_ELITE_ABLATION_MOVES = int(os.environ.get("DETOK_RETOK_ELITE_ABLATION_MOVE
 RETOK_ELITE_ABLATION_SAMPLES = int(os.environ.get("DETOK_RETOK_ELITE_ABLATION_SAMPLES", "6"))
 RETOK_ELITE_PREFIX_MOVES = int(os.environ.get("DETOK_RETOK_ELITE_PREFIX_MOVES", "128"))
 RETOK_ELITE_ADDBACK_MOVES = int(os.environ.get("DETOK_RETOK_ELITE_ADDBACK_MOVES", "64"))
+WORD_CHAR_OBJECTIVE_AUDIT = os.environ.get("DETOK_WORD_CHAR_OBJECTIVE_AUDIT", "0") == "1"
+WORD_CHAR_REF_BYTES = int(os.environ.get("DETOK_WORD_CHAR_REF_BYTES", "16000000"))
+WORD_CHAR_MAX_WORDS = int(os.environ.get("DETOK_WORD_CHAR_MAX_WORDS", "100000"))
+WORD_CHAR_TOP_MOVE_AUDIT = int(os.environ.get("DETOK_WORD_CHAR_TOP_MOVE_AUDIT", "512"))
+WORD_CHAR_MOVE_WINDOWS = int(os.environ.get("DETOK_WORD_CHAR_MOVE_WINDOWS", "32"))
+WORD_CHAR_WINDOW_RADIUS = int(os.environ.get("DETOK_WORD_CHAR_WINDOW_RADIUS", "16"))
+WORD_CHAR_SAMPLE_AUDIT = int(os.environ.get("DETOK_WORD_CHAR_SAMPLE_AUDIT", "96"))
 
 TOP_TOKENS = 50_000
 ANCHORS = 8_192
@@ -1854,6 +1863,385 @@ def retok_batch_signal_audit(
     return summary
 
 
+class ByteBackoffNgramLM:
+    def __init__(self, order: int = 5, alpha: float = 0.05):
+        self.order = int(order)
+        self.alpha = float(alpha)
+        self.context_counts: list[dict[tuple[int, ...], int]] = [dict() for _ in range(order)]
+        self.next_counts: list[dict[tuple[int, ...], dict[int, int]]] = [dict() for _ in range(order)]
+
+    def train(self, data: bytes) -> None:
+        padded = bytes([0]) * (self.order - 1) + data
+        for pos in range(self.order - 1, len(padded)):
+            nxt = int(padded[pos])
+            for n in range(self.order):
+                ctx = tuple(padded[pos - n : pos]) if n else ()
+                self.context_counts[n][ctx] = self.context_counts[n].get(ctx, 0) + 1
+                bucket = self.next_counts[n].setdefault(ctx, {})
+                bucket[nxt] = bucket.get(nxt, 0) + 1
+
+    def nll_per_byte(self, data: bytes) -> float:
+        if not data:
+            return 99.0
+        padded = bytes([0]) * (self.order - 1) + data
+        nll = 0.0
+        for pos in range(self.order - 1, len(padded)):
+            nxt = int(padded[pos])
+            for n in range(self.order - 1, -1, -1):
+                ctx = tuple(padded[pos - n : pos]) if n else ()
+                total = self.context_counts[n].get(ctx, 0)
+                if total:
+                    count = self.next_counts[n].get(ctx, {}).get(nxt, 0)
+                    nll -= math.log((count + self.alpha) / (total + self.alpha * 256))
+                    break
+            else:
+                nll += math.log(256)
+        return nll / len(data)
+
+
+class WordCharSourceModel:
+    def __init__(self, reference_path: Path, ref_bytes: int = WORD_CHAR_REF_BYTES):
+        raw = reference_path.read_bytes()[:ref_bytes]
+        self.char_lm = ByteBackoffNgramLM(order=5, alpha=0.05)
+        self.char_lm.train(raw)
+        text = raw.decode("utf-8", errors="ignore").lower()
+        word_counts: dict[str, int] = {}
+        for word in re.findall(r"[a-z]+(?:'[a-z]+)?", text):
+            word_counts[word] = word_counts.get(word, 0) + 1
+        top_words = sorted(word_counts.items(), key=lambda item: item[1], reverse=True)[:WORD_CHAR_MAX_WORDS]
+        self.word_counts = dict(top_words)
+        self.word_total = float(sum(self.word_counts.values()))
+        self.word_vocab = max(1, len(self.word_counts))
+        self.alpha = 0.1
+        self.malformed_penalty = 8.0
+        print(
+            f"word_char_model_ref_bytes={len(raw)} word_vocab={self.word_vocab} word_total={int(self.word_total)}",
+            flush=True,
+        )
+
+    def score_text(self, text: str) -> dict[str, float]:
+        data = text.encode("utf-8", errors="replace")
+        char_nll = self.char_lm.nll_per_byte(data)
+        tokens = re.findall(r"[A-Za-z]+(?:'[A-Za-z]+)?|[A-Za-z0-9]+", text)
+        word_nll = 0.0
+        word_like = 0
+        unknown = 0
+        malformed = 0
+        denom = self.word_total + self.alpha * (self.word_vocab + 1)
+        for token in tokens:
+            lower = token.lower()
+            if re.fullmatch(r"[a-z]+(?:'[a-z]+)?", lower):
+                word_like += 1
+                count = self.word_counts.get(lower, 0)
+                if count == 0:
+                    unknown += 1
+                word_nll -= math.log((count + self.alpha) / denom)
+            elif any(ch.isalpha() for ch in lower):
+                malformed += 1
+                word_like += 1
+                word_nll += self.malformed_penalty + self.char_lm.nll_per_byte(lower.encode("utf-8", errors="replace"))
+        word_nll_per_word = word_nll / max(1, word_like)
+        combined = 0.8 * word_nll_per_word + 0.2 * char_nll
+        return {
+            "char_nll": float(char_nll),
+            "word_nll": float(word_nll_per_word),
+            "word_char": float(combined),
+            "word_count": int(word_like),
+            "unknown_word_rate": float(unknown / max(1, word_like)),
+            "malformed_rate": float(malformed / max(1, word_like)),
+        }
+
+
+def score_word_char_row(
+    name: str,
+    text: str,
+    task,
+    retok_lm: SparseTokenBigramLM,
+    word_char_model: WordCharSourceModel,
+) -> dict[str, float | int | str]:
+    metrics = evaluate_recovery(task, text, SAMPLE_TOKENS)
+    retok_ids = task.target_adapter.encode(text)
+    retok_score = retok_lm.score_ids(retok_ids)
+    word_char = word_char_model.score_text(text)
+    row: dict[str, float | int | str] = {
+        "name": name,
+        "cer50k": float(metrics["cer50k"]),
+        "byte_lm_bpb": float(metrics["byte_lm_bpb"]),
+        "retok_backoff_nll": float(retok_score["backoff_nll"]),
+        "retok_bigram_nll": float(retok_score["bigram_nll"]),
+    }
+    row.update(word_char)
+    return row
+
+
+def word_char_source_audit(
+    task,
+    sample_cipher: np.ndarray,
+    mapping: np.ndarray,
+    emissions: dict[int, tuple[int, ...]],
+    retok_lm: SparseTokenBigramLM,
+    baseline_cer: float,
+    cem_overrides: dict[int, int] | None = None,
+    elite_overrides: dict[int, int] | None = None,
+    pool: list[dict[str, float | int]] | None = None,
+    all_samples: list[tuple[float, dict[int, int], list[int], dict[str, float | int], int]] | None = None,
+) -> dict[str, object]:
+    word_char_model = WordCharSourceModel(task.reference_text)
+    focus = LAST_C_FOCUS[: min(ORACLE_AUDIT_TYPES, len(LAST_C_FOCUS))]
+    inv = inverse_permutation(task.perm)
+    truth: dict[int, int] = {}
+    for c in focus:
+        true_p, _piece, _cls = singleton_truth_for_cipher(task, int(c), inv)
+        if true_p is not None:
+            truth[int(c)] = int(true_p)
+    graph_pool = graph_candidate_pool(LAST_FINAL_EDGES, TORCH_TOPK)
+    graph_overrides = {c: p for c, p in truth.items() if p in graph_pool.get(c, set())}
+    all_truth_overrides = dict(truth)
+
+    rows: list[dict[str, float | int | str]] = []
+    baseline_text = decode_with_variable_emissions(sample_cipher, mapping, emissions, task.target_adapter)
+    rows.append(score_word_char_row("baseline", baseline_text, task, retok_lm, word_char_model))
+    rows.append(
+        score_word_char_row(
+            "graph_top64_oracle",
+            decode_with_singleton_overrides(sample_cipher, mapping, emissions, graph_overrides, task.target_adapter),
+            task,
+            retok_lm,
+            word_char_model,
+        )
+    )
+    rows.append(
+        score_word_char_row(
+            f"true_singleton_top{len(focus)}",
+            decode_with_singleton_overrides(sample_cipher, mapping, emissions, all_truth_overrides, task.target_adapter),
+            task,
+            retok_lm,
+            word_char_model,
+        )
+    )
+    if cem_overrides:
+        rows.append(
+            score_word_char_row(
+                "cem_selected",
+                decode_with_singleton_overrides(sample_cipher, mapping, emissions, cem_overrides, task.target_adapter),
+                task,
+                retok_lm,
+                word_char_model,
+            )
+        )
+    if elite_overrides:
+        rows.append(
+            score_word_char_row(
+                "elite_filter_selected",
+                decode_with_singleton_overrides(sample_cipher, mapping, emissions, elite_overrides, task.target_adapter),
+                task,
+                retok_lm,
+                word_char_model,
+            )
+        )
+
+    pool_good_rows: list[dict[str, float | int]] = []
+    move_scores: dict[tuple[int, int], dict[str, float | int]] = {}
+    if pool:
+        pool_good: list[tuple[float, int, int]] = []
+        for move in pool:
+            c = int(move["c"])
+            p = int(move["p"])
+            if truth.get(c) == p:
+                pool_good.append((float(move.get("prior_score", 0.0)), c, p))
+        pool_good.sort(reverse=True)
+        for n in (8, 16, 32, 64, 128):
+            overrides: dict[int, int] = {}
+            used_p: set[int] = set()
+            for _prior, c, p in pool_good:
+                if c in overrides or p in used_p:
+                    continue
+                overrides[c] = p
+                used_p.add(p)
+                if len(overrides) >= n:
+                    break
+            if not overrides:
+                continue
+            row = score_word_char_row(
+                f"cem_pool_oracle_good_top{n}",
+                decode_with_singleton_overrides(sample_cipher, mapping, emissions, overrides, task.target_adapter),
+                task,
+                retok_lm,
+                word_char_model,
+            )
+            rows.append(row)
+            pool_good_rows.append(
+                {
+                    "n": int(n),
+                    "moves": int(len(overrides)),
+                    "cer50k": float(row["cer50k"]),
+                    "word_char": float(row["word_char"]),
+                    "retok_backoff_nll": float(row["retok_backoff_nll"]),
+                }
+            )
+
+        labels: list[int] = []
+        scores: dict[str, list[float]] = {
+            "word_char_delta": [],
+            "char_nll_delta": [],
+            "word_nll_delta": [],
+            "retok_backoff_delta": [],
+        }
+        candidate_pool = pool[: min(WORD_CHAR_TOP_MOVE_AUDIT, len(pool))]
+        focus_move_cs = {int(move["c"]) for move in candidate_pool}
+        positions_by_c: dict[int, list[int]] = {c: [] for c in focus_move_cs}
+        for pos, c in enumerate(sample_cipher):
+            c_int = int(c)
+            if c_int in positions_by_c:
+                positions_by_c[c_int].append(pos)
+        current_piece_cache: dict[int, str] = {}
+        target_piece_cache: dict[int, str] = {}
+        for move in candidate_pool:
+            c = int(move["c"])
+            p = int(move["p"])
+            positions = positions_by_c.get(c, [])
+            sampled_positions = choose_occurrence_sample(positions, WORD_CHAR_MOVE_WINDOWS)
+            candidate_piece = target_piece(p, task.target_adapter, target_piece_cache)
+            wc_deltas: list[float] = []
+            char_deltas: list[float] = []
+            word_deltas: list[float] = []
+            retok_deltas: list[float] = []
+            for pos in sampled_positions:
+                start = max(0, pos - WORD_CHAR_WINDOW_RADIUS)
+                stop = min(len(sample_cipher), pos + WORD_CHAR_WINDOW_RADIUS + 1)
+                old_parts: list[str] = []
+                new_parts: list[str] = []
+                for j in range(start, stop):
+                    c_j = int(sample_cipher[j])
+                    old_piece = current_piece_for_cipher(c_j, mapping, emissions, task.target_adapter, current_piece_cache)
+                    old_parts.append(old_piece)
+                    new_parts.append(candidate_piece if j == pos else old_piece)
+                old_text = "".join(old_parts)
+                new_text = "".join(new_parts)
+                old_wc = word_char_model.score_text(old_text)
+                new_wc = word_char_model.score_text(new_text)
+                old_retok = retok_lm.score_ids(task.target_adapter.encode(old_text))
+                new_retok = retok_lm.score_ids(task.target_adapter.encode(new_text))
+                wc_deltas.append(float(old_wc["word_char"] - new_wc["word_char"]))
+                char_deltas.append(float(old_wc["char_nll"] - new_wc["char_nll"]))
+                word_deltas.append(float(old_wc["word_nll"] - new_wc["word_nll"]))
+                retok_deltas.append(float(old_retok["backoff_nll"] - new_retok["backoff_nll"]))
+            if not wc_deltas:
+                continue
+            label = 1 if truth.get(c) == p else 0
+            labels.append(label)
+            scores["word_char_delta"].append(float(np.median(np.asarray(wc_deltas, dtype=np.float64))))
+            scores["char_nll_delta"].append(float(np.median(np.asarray(char_deltas, dtype=np.float64))))
+            scores["word_nll_delta"].append(float(np.median(np.asarray(word_deltas, dtype=np.float64))))
+            scores["retok_backoff_delta"].append(float(np.median(np.asarray(retok_deltas, dtype=np.float64))))
+            move_scores[(c, p)] = {
+                "label": label,
+                "word_char_delta": scores["word_char_delta"][-1],
+                "char_nll_delta": scores["char_nll_delta"][-1],
+                "word_nll_delta": scores["word_nll_delta"][-1],
+                "retok_backoff_delta": scores["retok_backoff_delta"][-1],
+            }
+        move_audit = {
+            name: {
+                "auc": auc_from_scores(labels, values),
+                "top100_precision": top_precision(labels, values, 100),
+                "top500_precision": top_precision(labels, values, 500),
+            }
+            for name, values in scores.items()
+        }
+    else:
+        move_audit = {}
+
+    sample_rows: list[dict[str, float | int]] = []
+    if all_samples:
+        sample_wc_scores: list[float] = []
+        sample_cer_deltas: list[float] = []
+        sample_retok_scores: list[float] = []
+        if len(all_samples) > WORD_CHAR_SAMPLE_AUDIT:
+            sample_indices = np.linspace(0, len(all_samples) - 1, WORD_CHAR_SAMPLE_AUDIT, dtype=np.int64)
+            scored_samples = [all_samples[int(i)] for i in sample_indices]
+        else:
+            scored_samples = all_samples
+        for objective, overrides, _indices, _details, round_idx in scored_samples:
+            text = decode_with_singleton_overrides(sample_cipher, mapping, emissions, overrides, task.target_adapter)
+            wc = word_char_model.score_text(text)
+            metrics = evaluate_recovery(task, text, SAMPLE_TOKENS)
+            sample_wc_scores.append(-float(wc["word_char"]))
+            sample_retok_scores.append(-float(objective))
+            sample_cer_deltas.append(float(baseline_cer - float(metrics["cer50k"])))
+            sample_rows.append(
+                {
+                    "round": int(round_idx),
+                    "moves": int(len(overrides)),
+                    "word_char": float(wc["word_char"]),
+                    "cer_delta": float(sample_cer_deltas[-1]),
+                    "retok_objective": float(objective),
+                }
+            )
+        batch_audit = {
+            "samples": int(len(scored_samples)),
+            "total_samples": int(len(all_samples)),
+            "word_char_vs_cer_corr": pearson_corr(sample_wc_scores, sample_cer_deltas),
+            "retok_vs_cer_corr": pearson_corr(sample_retok_scores, sample_cer_deltas),
+        }
+    else:
+        batch_audit = {}
+
+    if cem_overrides and move_scores:
+        selected_labels = []
+        selected_word = []
+        selected_retok = []
+        for c, p in cem_overrides.items():
+            item = move_scores.get((int(c), int(p)))
+            if item is None:
+                continue
+            selected_labels.append(int(item["label"]))
+            selected_word.append(float(item["word_char_delta"]))
+            selected_retok.append(float(item["retok_backoff_delta"]))
+        selected_audit = {
+            "moves_scored": int(len(selected_labels)),
+            "good_moves_scored": int(sum(selected_labels)),
+            "word_char_auc": auc_from_scores(selected_labels, selected_word),
+            "retok_auc": auc_from_scores(selected_labels, selected_retok),
+            "mean_word_good": float(np.mean([s for s, y in zip(selected_word, selected_labels) if y])) if any(selected_labels) else 0.0,
+            "mean_word_bad": float(np.mean([s for s, y in zip(selected_word, selected_labels) if not y]))
+            if len(selected_labels) > sum(selected_labels)
+            else 0.0,
+        }
+    else:
+        selected_audit = {}
+
+    print("word_char_objective_rows:", flush=True)
+    for row in rows:
+        print(
+            f"  {row['name']}: cer={row['cer50k']:.6f} retok_nll={row['retok_backoff_nll']:.6f} "
+            f"char_nll={row['char_nll']:.6f} word_nll={row['word_nll']:.6f} "
+            f"word_char={row['word_char']:.6f} unk={row['unknown_word_rate']:.4f} malformed={row['malformed_rate']:.4f}",
+            flush=True,
+        )
+    print(
+        "word_char_objective_summary:",
+        json.dumps(
+            {
+                "move_audit": move_audit,
+                "batch_audit": batch_audit,
+                "selected_audit": selected_audit,
+                "pool_good_rows": pool_good_rows,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+    return {
+        "rows": rows,
+        "move_audit": move_audit,
+        "batch_audit": batch_audit,
+        "selected_audit": selected_audit,
+        "pool_good_rows": pool_good_rows,
+        "sample_rows_head": sample_rows[:10],
+    }
+
+
 def build_cem_candidate_moves(mapping: np.ndarray) -> list[dict[str, float | int]]:
     focus = [int(c) for c in LAST_C_FOCUS[: min(RETOK_CEM_TYPES, len(LAST_C_FOCUS))]]
     graph_scores = graph_score_pool(LAST_FINAL_EDGES, TORCH_TOPK)
@@ -2514,6 +2902,8 @@ def retok_cem_search(
         "best_details": best_details,
         "accepted": bool(best_overrides),
     }
+    cem_sample_overrides = dict(best_overrides)
+    elite_overrides: dict[int, int] = {}
     if RETOK_ELITE_FILTER and all_samples:
         elite_overrides, elite_report = elite_prefix_finalizer(
             task,
@@ -2541,6 +2931,19 @@ def retok_cem_search(
             report["best_source"] = "cem_sample"
     else:
         report["best_source"] = "cem_sample"
+    if WORD_CHAR_OBJECTIVE_AUDIT:
+        report["word_char_objective_audit"] = word_char_source_audit(
+            task,
+            sample_cipher,
+            mapping,
+            emissions,
+            lm,
+            float(baseline_metrics["cer50k"]),
+            cem_sample_overrides if cem_sample_overrides else None,
+            elite_overrides if elite_overrides else None,
+            pool,
+            all_samples,
+        )
     if not best_overrides:
         print("retok_cem_no_objective_improvement", flush=True)
         return mapping, emissions, report
