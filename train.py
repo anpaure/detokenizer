@@ -53,6 +53,7 @@ LEARN_WEIGHT_STEPS = 12
 LEARN_WEIGHT_LR = 0.2
 LEARN_WEIGHT_TEMP = 0.07
 DYNAMIC_ANCHOR_MAX_TOKENS = 100_000
+DYNAMIC_LEFT_CONTEXT_WEIGHT = 0.75
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -250,6 +251,9 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
         with torch.no_grad():
             c_left, c_right = torch_context_maps(cipher_ids, c_focus, c_anchors, device)
             p_left, p_right = torch_context_maps(ref_ids, p_focus, p_anchors, device)
+            if use_dynamic_anchors:
+                c_left.mul_(DYNAMIC_LEFT_CONTEXT_WEIGHT)
+                p_left.mul_(DYNAMIC_LEFT_CONTEXT_WEIGHT)
             c_parts = [c_left, c_right]
             p_parts = [p_left, p_right]
             if use_skip_context:
