@@ -58,10 +58,6 @@ def effective_candidate_window(num_cipher_tokens: int) -> int:
     return 25_000 if num_cipher_tokens >= 1_000_000 else CANDIDATE_WINDOW
 
 
-def effective_anchors(num_cipher_tokens: int) -> int:
-    return 16_384 if num_cipher_tokens >= 1_000_000 else ANCHORS
-
-
 def effective_rounds(num_cipher_tokens: int) -> int:
     return 8 if num_cipher_tokens >= 1_000_000 else ROUNDS
 
@@ -221,11 +217,9 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device: {device}", flush=True)
     candidate_window = effective_candidate_window(len(cipher_ids))
-    anchors = effective_anchors(len(cipher_ids))
     rounds = effective_rounds(len(cipher_ids))
     use_skip_context = len(cipher_ids) >= SKIP_CONTEXT_MIN_TOKENS
     print(f"candidate_window: {candidate_window}", flush=True)
-    print(f"anchors: {anchors}", flush=True)
     print(f"skip_context: {use_skip_context}", flush=True)
     c_counts = counts(cipher_ids, int(max(target_vocab_size, int(cipher_ids.max()) + 1)))
     p_counts = counts(ref_ids, target_vocab_size)
@@ -244,7 +238,7 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
     p_rank[p_order_all] = np.arange(target_vocab_size)
 
     for round_idx in range(rounds):
-        c_anchors = c_focus[: min(anchors, len(c_focus))]
+        c_anchors = c_focus[: min(ANCHORS, len(c_focus))]
         p_anchors = mapping[c_anchors]
         print(f"round {round_idx + 1}/{rounds}: focus={len(c_focus)} anchors={len(c_anchors)}", flush=True)
         with torch.no_grad():
@@ -342,7 +336,7 @@ def main() -> None:
         "reference_tokens": int(len(task.ref_ids)),
         "sample_tokens": SAMPLE_TOKENS,
         "top_tokens": TOP_TOKENS,
-        "anchors": effective_anchors(len(task.cipher_ids)),
+        "anchors": ANCHORS,
         "candidate_window": effective_candidate_window(len(task.cipher_ids)),
         "rounds": effective_rounds(len(task.cipher_ids)),
         "freq_weight": FREQ_WEIGHT,
@@ -365,7 +359,7 @@ def main() -> None:
     print(f"target_tokens_M:  {len(task.cipher_ids) / 1e6:.3f}")
     print(f"reference_tokens_M: {len(task.ref_ids) / 1e6:.3f}")
     print(f"top_tokens:       {TOP_TOKENS}")
-    print(f"anchors:          {effective_anchors(len(task.cipher_ids))}")
+    print(f"anchors:          {ANCHORS}")
     print(f"rounds:           {effective_rounds(len(task.cipher_ids))}")
 
 
