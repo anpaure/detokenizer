@@ -150,3 +150,7 @@ a4a6ab8	core-100k-gemma	0.456372	0.464420	2.650276	6.3	keep	2048-token tail repa
 dfd85ab	qwen36-o200k-100k-screen	0.451680	0.451680	2.693335	6.3	discard	high-margin variable emissions improved BPB but still lost exact CER on hard Qwen screen
 2c77200	qwen-mistral-gemma-100k-screen	0.459920	0.464420	2.673779	6.3	discard	single strongest variable emission is CER-neutral on three-pair screen with only tiny BPB gain
 1406268	core-100k-gemma	0.456364	0.464420	2.649934	6.3	keep	free local-pair variable emission gives a tiny non-same-tokenizer 100k mean CER and BPB gain
+313c32d	qwen36-o200k-100k-screen	0.451460	0.451460	2.694996	6.3	discard	hybrid segmental island decoder selected 512 islands but accepted 0 rewrites; graph-edge island C1 top12 recall only 0.3019
+313c32d	qwen36-o200k-100k-oracle-diagnostic	0.451460	0.451460	2.694996	6.3	diagnostic	oracle-in-lattice raised island C1 top12 recall to 0.9995 but conservative Viterbi still accepted 0 rewrites
+313c32d	qwen36-o200k-100k-loose-screen	0.454340	0.454340	2.662228	6.3	discard	loose segmental scoring accepted 487 islands and improved BPB but worsened CER
+313c32d	qwen36-o200k-100k-loose-oracle-diagnostic	0.449460	0.449460	2.662649	6.3	diagnostic	loose oracle-in-lattice accepted 474 islands and improved CER by 0.002 but used ground truth and missed material 0.005 gate

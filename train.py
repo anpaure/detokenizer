@@ -9,6 +9,7 @@ cer50k.
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from pathlib import Path
@@ -95,6 +96,25 @@ VARIABLE_EMISSION_MIN_COUNT = 10
 VARIABLE_EMISSION_MIN_GAIN_PER_OCC = 5.00
 VARIABLE_EMISSION_MAX_ACCEPTED = 2
 VARIABLE_EMISSION_FREE_LOCAL_PAIRS = True
+SEGMENTAL_TRANSDUCER_REPAIR = os.environ.get("DETOK_SEGMENTAL_REPAIR", "0") == "1"
+SEGMENTAL_MAX_TOKENS = int(os.environ.get("DETOK_SEGMENTAL_MAX_TOKENS", "100000"))
+SEGMENTAL_MAX_ISLANDS = int(os.environ.get("DETOK_SEGMENTAL_MAX_ISLANDS", "512"))
+SEGMENTAL_ISLAND_WINDOW = int(os.environ.get("DETOK_SEGMENTAL_ISLAND_WINDOW", "8"))
+SEGMENTAL_CONTEXT = int(os.environ.get("DETOK_SEGMENTAL_CONTEXT", "8"))
+SEGMENTAL_MAX_ISLAND_LEN = int(os.environ.get("DETOK_SEGMENTAL_MAX_ISLAND_LEN", "12"))
+SEGMENTAL_CANDIDATES_1 = int(os.environ.get("DETOK_SEGMENTAL_CANDIDATES_1", "12"))
+SEGMENTAL_CANDIDATES_2 = int(os.environ.get("DETOK_SEGMENTAL_CANDIDATES_2", "16"))
+SEGMENTAL_BEAM = int(os.environ.get("DETOK_SEGMENTAL_BEAM", "128"))
+SEGMENTAL_LM_WEIGHT = float(os.environ.get("DETOK_SEGMENTAL_LM_WEIGHT", "0.035"))
+SEGMENTAL_ALT_PENALTY = float(os.environ.get("DETOK_SEGMENTAL_ALT_PENALTY", "0.35"))
+SEGMENTAL_GRAPH_WEIGHT = float(os.environ.get("DETOK_SEGMENTAL_GRAPH_WEIGHT", "0.25"))
+SEGMENTAL_SPAN2_PENALTY = float(os.environ.get("DETOK_SEGMENTAL_SPAN2_PENALTY", "1.75"))
+SEGMENTAL_MIN_GAIN = float(os.environ.get("DETOK_SEGMENTAL_MIN_GAIN", "1.5"))
+SEGMENTAL_MAX_LENGTH_DELTA = int(os.environ.get("DETOK_SEGMENTAL_MAX_LENGTH_DELTA", "16"))
+SEGMENTAL_ORACLE_LATTICE = os.environ.get("DETOK_SEGMENTAL_ORACLE_LATTICE", "0") == "1"
+
+LAST_FINAL_EDGES: list[tuple[float, int, int]] = []
+SEGMENTAL_LAST_DIAGNOSTICS: dict[str, float | int] = {}
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
@@ -714,6 +734,7 @@ def align_shuffled(
     ref_ids: np.ndarray,
     target_vocab_size: int,
 ) -> np.ndarray:
+    global LAST_FINAL_EDGES
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device: {device}", flush=True)
     candidate_window = effective_candidate_window(len(cipher_ids))
@@ -798,6 +819,8 @@ def align_shuffled(
                 torch.cuda.empty_cache()
 
         edges.sort(reverse=True)
+        if round_idx == rounds - 1:
+            LAST_FINAL_EDGES = list(edges)
         used_c: set[int] = set()
         used_p: set[int] = set()
         assigned_p_by_c: dict[int, int] = {}
@@ -1145,6 +1168,423 @@ def decode_with_variable_emissions(
     return target_adapter.decode(out)
 
 
+def byte_lm_bits(lm, text: str) -> float:
+    data = text.encode("utf-8", errors="replace")
+    if not data:
+        return 0.0
+    return float(lm.bits_per_byte(data) * len(data))
+
+
+def lm_start_history(lm, prefix: str) -> bytes:
+    data = prefix.encode("utf-8", errors="replace")
+    padded = bytes([0]) * (lm.order - 1) + data
+    return padded[-(lm.order - 1) :] if lm.order > 1 else b""
+
+
+def lm_extend_bits(lm, history: bytes, data: bytes) -> tuple[float, bytes]:
+    hist = bytearray(history)
+    bits = 0.0
+    for nxt in data:
+        max_order = min(lm.order - 1, len(hist))
+        for n in range(max_order, -1, -1):
+            ctx = tuple(hist[-n:]) if n else ()
+            total = lm.context_counts[n].get(ctx, 0)
+            if total:
+                count = lm.next_counts[n].get(ctx, {}).get(int(nxt), 0)
+                bits -= math.log2((count + lm.alpha) / (total + lm.alpha * 256))
+                break
+        else:
+            bits += 8.0
+        hist.append(int(nxt))
+        if lm.order > 1 and len(hist) > lm.order - 1:
+            del hist[: len(hist) - (lm.order - 1)]
+    return bits, bytes(hist)
+
+
+def token_piece(adapter, token_id: int, cache: dict[int, str]) -> str:
+    token_id = int(token_id)
+    piece = cache.get(token_id)
+    if piece is None:
+        piece = adapter.decode([token_id])
+        cache[token_id] = piece
+    return piece
+
+
+def emission_piece(
+    cipher_id: int,
+    mapping: np.ndarray,
+    emissions: dict[int, tuple[int, ...]],
+    target_adapter,
+    piece_cache: dict[int, str],
+) -> str:
+    emission = emissions.get(int(cipher_id))
+    if emission is not None:
+        return target_adapter.decode([int(p) for p in emission])
+    return token_piece(target_adapter, int(mapping[int(cipher_id)]), piece_cache)
+
+
+def plausible_piece(piece: str) -> bool:
+    if not piece or "\ufffd" in piece:
+        return False
+    return len(piece.encode("utf-8", errors="replace")) <= 48
+
+
+def build_segmental_edge_index(
+    edges: list[tuple[float, int, int]],
+    target_adapter,
+    max_candidates: int,
+) -> dict[int, list[tuple[float, int, str]]]:
+    piece_cache: dict[int, str] = {}
+    by_c: dict[int, list[tuple[float, int, str]]] = {}
+    seen: dict[int, set[str]] = {}
+    for score, c, p in edges:
+        bucket = by_c.setdefault(int(c), [])
+        if len(bucket) >= max_candidates:
+            continue
+        piece = token_piece(target_adapter, int(p), piece_cache)
+        if not plausible_piece(piece):
+            continue
+        seen_bucket = seen.setdefault(int(c), set())
+        if piece in seen_bucket:
+            continue
+        seen_bucket.add(piece)
+        bucket.append((float(score), int(p), piece))
+    return by_c
+
+
+def segmental_singleton_candidates(
+    c: int,
+    mapping: np.ndarray,
+    emissions: dict[int, tuple[int, ...]],
+    edge_index: dict[int, list[tuple[float, int, str]]],
+    target_adapter,
+    piece_cache: dict[int, str],
+    oracle_piece: str | None = None,
+) -> list[tuple[str, float, str]]:
+    current = emission_piece(c, mapping, emissions, target_adapter, piece_cache)
+    candidates: list[tuple[str, float, str]] = [(current, 0.0, "current")]
+    seen = {current}
+    if oracle_piece is not None and oracle_piece not in seen and plausible_piece(oracle_piece):
+        candidates.append((oracle_piece, -SEGMENTAL_ALT_PENALTY, "oracle"))
+        seen.add(oracle_piece)
+    edge_bucket = edge_index.get(int(c), [])
+    top_score = edge_bucket[0][0] if edge_bucket else 0.0
+    for rank, (score, _p, piece) in enumerate(edge_bucket[:SEGMENTAL_CANDIDATES_1]):
+        if piece in seen or not plausible_piece(piece):
+            continue
+        prior = -SEGMENTAL_ALT_PENALTY * (rank + 1) + SEGMENTAL_GRAPH_WEIGHT * (score - top_score)
+        candidates.append((piece, float(prior), "edge"))
+        seen.add(piece)
+    return candidates[:SEGMENTAL_CANDIDATES_1]
+
+
+def segmental_pair_candidates(
+    left: int,
+    right: int,
+    left_cands: list[tuple[str, float, str]],
+    right_cands: list[tuple[str, float, str]],
+    target_adapter,
+) -> list[tuple[str, float, str]]:
+    candidates: list[tuple[str, float, str]] = []
+    seen: set[str] = set()
+
+    def add(piece: str, prior: float, source: str) -> None:
+        if piece in seen or not plausible_piece(piece):
+            return
+        seen.add(piece)
+        candidates.append((piece, prior, source))
+
+    add(left_cands[0][0] + right_cands[0][0], -SEGMENTAL_SPAN2_PENALTY, "pair_current")
+    for i, (left_piece, left_prior, _) in enumerate(left_cands[:4]):
+        for j, (right_piece, right_prior, _) in enumerate(right_cands[:4]):
+            add(
+                left_piece + right_piece,
+                -SEGMENTAL_SPAN2_PENALTY + 0.5 * (left_prior + right_prior) - 0.05 * (i + j),
+                "pair_concat",
+            )
+    base = left_cands[0][0] + right_cands[0][0]
+    encoded = target_adapter.encode(base)
+    if 0 < len(encoded) <= 3:
+        normalized = target_adapter.decode(encoded)
+        add(normalized, -SEGMENTAL_SPAN2_PENALTY - 0.15, "pair_retokenized")
+    return candidates[:SEGMENTAL_CANDIDATES_2]
+
+
+def inverse_perm(perm: np.ndarray) -> np.ndarray:
+    inv = np.full(int(perm.max(initial=0)) + 1, -1, dtype=np.int64)
+    inv[perm.astype(np.int64, copy=False)] = np.arange(len(perm), dtype=np.int64)
+    return inv
+
+
+def oracle_single_piece(task, cipher_id: int, inv: np.ndarray, cache: dict[int, str | None]) -> str | None:
+    cipher_id = int(cipher_id)
+    if cipher_id in cache:
+        return cache[cipher_id]
+    if cipher_id >= len(inv) or int(inv[cipher_id]) < 0:
+        cache[cipher_id] = None
+        return None
+    source_id = int(inv[cipher_id])
+    source_piece = task.source_adapter.decode([source_id])
+    target_ids = task.target_adapter.encode(source_piece)
+    if len(target_ids) != 1:
+        cache[cipher_id] = None
+        return None
+    piece = task.target_adapter.decode(target_ids)
+    cache[cipher_id] = piece
+    return piece
+
+
+def choose_segmental_islands(
+    cipher_ids: np.ndarray,
+    pieces: list[str],
+    edge_index: dict[int, list[tuple[float, int, str]]],
+    lm,
+) -> list[tuple[int, int]]:
+    n = len(cipher_ids)
+    if n == 0:
+        return []
+    width = min(SEGMENTAL_ISLAND_WINDOW, SEGMENTAL_MAX_ISLAND_LEN, n)
+    step = max(1, width // 2)
+    scored: list[tuple[float, int, int]] = []
+    for start in range(0, max(1, n - width + 1), step):
+        end = min(n, start + width)
+        uncertainty = 0.0
+        for c in cipher_ids[start:end]:
+            bucket = edge_index.get(int(c), [])
+            if len(bucket) >= 2:
+                margin = max(0.0, bucket[0][0] - bucket[1][0])
+                uncertainty += 1.0 / (1.0 + 25.0 * margin)
+            elif bucket:
+                uncertainty += 0.15
+        text = "".join(pieces[start:end])
+        local_bpb = lm.bits_per_byte(text.encode("utf-8", errors="replace")) if text else 0.0
+        score = uncertainty + 0.20 * float(local_bpb)
+        scored.append((score, start, end))
+    scored.sort(reverse=True)
+    islands: list[tuple[int, int]] = []
+    occupied = np.zeros(n, dtype=bool)
+    for score, start, end in scored:
+        if len(islands) >= SEGMENTAL_MAX_ISLANDS:
+            break
+        if score <= 0.0 or bool(occupied[max(0, start - 1) : min(n, end + 1)].any()):
+            continue
+        islands.append((start, end))
+        occupied[start:end] = True
+    islands.sort()
+    return islands
+
+
+def run_segmental_viterbi(
+    cipher_slice: np.ndarray,
+    prefix: str,
+    suffix: str,
+    old_mid: str,
+    singleton_by_pos: list[list[tuple[str, float, str]]],
+    pair_by_pos: dict[int, list[tuple[str, float, str]]],
+    lm,
+) -> tuple[str, float, dict[str, float | int]]:
+    start_hist = lm_start_history(lm, prefix)
+    old_mid_bits, old_hist = lm_extend_bits(lm, start_hist, old_mid.encode("utf-8", errors="replace"))
+    old_suffix_bits, _ = lm_extend_bits(lm, old_hist, suffix.encode("utf-8", errors="replace"))
+    old_lm_bits = old_mid_bits + old_suffix_bits
+    old_score = -SEGMENTAL_LM_WEIGHT * old_lm_bits
+    beams: dict[int, list[tuple[float, str, int, float, bytes, float]]] = {
+        0: [(0.0, "", 0, 0.0, start_hist, 0.0)]
+    }
+    n = len(cipher_slice)
+    for pos in range(n):
+        states = beams.get(pos)
+        if not states:
+            continue
+        for _approx_score, text, span2_count, channel_score, hist, lm_bits_so_far in states:
+            for piece, prior, _source in singleton_by_pos[pos]:
+                piece_bytes = piece.encode("utf-8", errors="replace")
+                piece_bits, next_hist = lm_extend_bits(lm, hist, piece_bytes)
+                new_text = text + piece
+                new_channel = channel_score + prior
+                new_lm_bits = lm_bits_so_far + piece_bits
+                approx = new_channel - SEGMENTAL_LM_WEIGHT * new_lm_bits
+                beams.setdefault(pos + 1, []).append(
+                    (approx, new_text, span2_count, new_channel, next_hist, new_lm_bits)
+                )
+            if pos + 1 < n:
+                for piece, prior, _source in pair_by_pos.get(pos, []):
+                    piece_bytes = piece.encode("utf-8", errors="replace")
+                    piece_bits, next_hist = lm_extend_bits(lm, hist, piece_bytes)
+                    new_text = text + piece
+                    new_channel = channel_score + prior
+                    new_lm_bits = lm_bits_so_far + piece_bits
+                    approx = new_channel - SEGMENTAL_LM_WEIGHT * new_lm_bits
+                    beams.setdefault(pos + 2, []).append(
+                        (approx, new_text, span2_count + 1, new_channel, next_hist, new_lm_bits)
+                    )
+        for key in (pos + 1, pos + 2):
+            if key in beams and len(beams[key]) > SEGMENTAL_BEAM:
+                beams[key].sort(key=lambda item: item[0], reverse=True)
+                beams[key] = beams[key][:SEGMENTAL_BEAM]
+    finals = beams.get(n, [])
+    if not finals:
+        return old_mid, 0.0, {"span2": 0, "channel_delta": 0.0, "lm_delta": 0.0}
+    best_text = old_mid
+    best_score = old_score
+    best_span2 = 0
+    best_channel = 0.0
+    best_lm_delta = 0.0
+    suffix_bytes = suffix.encode("utf-8", errors="replace")
+    for _approx, text, span2_count, channel_score, hist, lm_bits_so_far in finals:
+        suffix_bits, _ = lm_extend_bits(lm, hist, suffix_bytes)
+        lm_bits = lm_bits_so_far + suffix_bits
+        total = channel_score - SEGMENTAL_LM_WEIGHT * lm_bits
+        if total > best_score:
+            best_score = total
+            best_text = text
+            best_span2 = span2_count
+            best_channel = channel_score
+            best_lm_delta = old_lm_bits - lm_bits
+    return (
+        best_text,
+        best_score - old_score,
+        {"span2": best_span2, "channel_delta": best_channel, "lm_delta": best_lm_delta},
+    )
+
+
+def segmental_island_repair(
+    task,
+    cipher_ids: np.ndarray,
+    mapping: np.ndarray,
+    emissions: dict[int, tuple[int, ...]],
+) -> str:
+    global SEGMENTAL_LAST_DIAGNOSTICS
+    SEGMENTAL_LAST_DIAGNOSTICS = {}
+    if (
+        not SEGMENTAL_TRANSDUCER_REPAIR
+        or len(cipher_ids) > SEGMENTAL_MAX_TOKENS
+        or not LAST_FINAL_EDGES
+    ):
+        return decode_with_variable_emissions(cipher_ids, mapping, emissions, task.target_adapter)
+
+    piece_cache: dict[int, str] = {}
+    pieces = [emission_piece(int(c), mapping, emissions, task.target_adapter, piece_cache) for c in cipher_ids]
+    edge_index = build_segmental_edge_index(LAST_FINAL_EDGES, task.target_adapter, SEGMENTAL_CANDIDATES_1)
+    islands = choose_segmental_islands(cipher_ids, pieces, edge_index, task.byte_lm)
+    if not islands:
+        return "".join(pieces)
+
+    inv = inverse_perm(task.perm)
+    oracle_cache: dict[int, str | None] = {}
+    singleton_cache: dict[int, list[tuple[str, float, str]]] = {}
+
+    def singleton(c: int) -> list[tuple[str, float, str]]:
+        c = int(c)
+        cached = singleton_cache.get(c)
+        if cached is not None:
+            return cached
+        oracle = oracle_single_piece(task, c, inv, oracle_cache) if SEGMENTAL_ORACLE_LATTICE else None
+        cached = segmental_singleton_candidates(
+            c,
+            mapping,
+            emissions,
+            edge_index,
+            task.target_adapter,
+            piece_cache,
+            oracle_piece=oracle,
+        )
+        singleton_cache[c] = cached
+        return cached
+
+    oracle_total = 0
+    top1 = top4 = top12 = 0
+    for start, end in islands:
+        for c in cipher_ids[start:end]:
+            oracle = oracle_single_piece(task, int(c), inv, oracle_cache)
+            if oracle is None:
+                continue
+            oracle_total += 1
+            cand = [piece for piece, _prior, _source in singleton(int(c))]
+            top1 += int(bool(cand[:1]) and cand[0] == oracle)
+            top4 += int(oracle in cand[:4])
+            top12 += int(oracle in cand[:12])
+
+    repaired: list[str] = []
+    cursor = 0
+    accepted = 0
+    span2_used = 0
+    gains: list[float] = []
+    lm_gains: list[float] = []
+    channel_deltas: list[float] = []
+    for start, end in islands:
+        repaired.extend(pieces[cursor:start])
+        prefix_start = max(0, start - SEGMENTAL_CONTEXT)
+        suffix_end = min(len(cipher_ids), end + SEGMENTAL_CONTEXT)
+        prefix = "".join(pieces[prefix_start:start])
+        suffix = "".join(pieces[end:suffix_end])
+        old_mid = "".join(pieces[start:end])
+        singleton_by_pos = [singleton(int(c)) for c in cipher_ids[start:end]]
+        pair_by_pos: dict[int, list[tuple[str, float, str]]] = {}
+        for rel in range(0, end - start - 1):
+            pair_by_pos[rel] = segmental_pair_candidates(
+                int(cipher_ids[start + rel]),
+                int(cipher_ids[start + rel + 1]),
+                singleton_by_pos[rel],
+                singleton_by_pos[rel + 1],
+                task.target_adapter,
+            )
+        new_mid, gain, stats = run_segmental_viterbi(
+            cipher_ids[start:end],
+            prefix,
+            suffix,
+            old_mid,
+            singleton_by_pos,
+            pair_by_pos,
+            task.byte_lm,
+        )
+        length_delta = abs(len(new_mid.encode("utf-8", errors="replace")) - len(old_mid.encode("utf-8", errors="replace")))
+        if new_mid != old_mid and gain >= SEGMENTAL_MIN_GAIN and length_delta <= SEGMENTAL_MAX_LENGTH_DELTA:
+            repaired.append(new_mid)
+            accepted += 1
+            span2_used += int(stats["span2"])
+            gains.append(float(gain))
+            lm_gains.append(float(stats["lm_delta"]))
+            channel_deltas.append(float(stats["channel_delta"]))
+        else:
+            repaired.append(old_mid)
+        cursor = end
+    repaired.extend(pieces[cursor:])
+
+    diagnostics: dict[str, float | int] = {
+        "segmental_islands": len(islands),
+        "segmental_accepted": accepted,
+        "segmental_span2_used": span2_used,
+        "segmental_oracle_singletons": oracle_total,
+        "segmental_c1_top1_recall": (top1 / oracle_total) if oracle_total else 0.0,
+        "segmental_c1_top4_recall": (top4 / oracle_total) if oracle_total else 0.0,
+        "segmental_c1_top12_recall": (top12 / oracle_total) if oracle_total else 0.0,
+    }
+    if gains:
+        gains_arr = np.asarray(gains, dtype=np.float32)
+        diagnostics["segmental_gain_median"] = float(np.median(gains_arr))
+        diagnostics["segmental_gain_p90"] = float(np.percentile(gains_arr, 90))
+        diagnostics["segmental_lm_delta_mean"] = float(np.mean(lm_gains))
+        diagnostics["segmental_channel_delta_mean"] = float(np.mean(channel_deltas))
+    SEGMENTAL_LAST_DIAGNOSTICS = diagnostics
+    print(f"segmental_islands={len(islands)} accepted={accepted} span2_used={span2_used}", flush=True)
+    print(
+        "segmental_c1_recall="
+        f"top1:{diagnostics['segmental_c1_top1_recall']:.4f} "
+        f"top4:{diagnostics['segmental_c1_top4_recall']:.4f} "
+        f"top12:{diagnostics['segmental_c1_top12_recall']:.4f} "
+        f"oracle_n:{oracle_total}",
+        flush=True,
+    )
+    if gains:
+        print(
+            f"segmental_gain_median={diagnostics['segmental_gain_median']:.6f} "
+            f"p90={diagnostics['segmental_gain_p90']:.6f}",
+            flush=True,
+        )
+    return "".join(repaired)
+
+
 def main() -> None:
     t0 = time.time()
     task = load_task(
@@ -1161,12 +1601,20 @@ def main() -> None:
 
     mapping = align_shuffled(task.cipher_ids, task.ref_ids, task.target_adapter.spec.vocab_size)
     emissions = variable_emission_repair(task.cipher_ids, task.ref_ids, mapping, task.target_adapter.spec.vocab_size)
-    recovered_sample = decode_with_variable_emissions(
-        task.cipher_ids[:SAMPLE_TOKENS],
+    sample_cipher = task.cipher_ids[:SAMPLE_TOKENS]
+    recovered_sample = segmental_island_repair(
+        task,
+        sample_cipher,
         mapping,
         emissions,
-        task.target_adapter,
     )
+    if not recovered_sample:
+        recovered_sample = decode_with_variable_emissions(
+            sample_cipher,
+            mapping,
+            emissions,
+            task.target_adapter,
+        )
     metrics = evaluate_recovery(task, recovered_sample, SAMPLE_TOKENS)
     diagnostics: dict[str, int] = {}
     if ENABLE_DIAGNOSTICS:
@@ -1197,6 +1645,8 @@ def main() -> None:
         "learn_skip_weight": LEARN_SKIP_WEIGHT,
         "variable_emission_repair": VARIABLE_EMISSION_REPAIR,
         "variable_emissions": len(emissions),
+        "segmental_transducer_repair": SEGMENTAL_TRANSDUCER_REPAIR,
+        "segmental_diagnostics": SEGMENTAL_LAST_DIAGNOSTICS,
         "diagnostics": diagnostics,
         "elapsed_seconds": time.time() - t0,
         "metrics": metrics,
