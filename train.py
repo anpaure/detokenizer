@@ -148,7 +148,11 @@ ORACLE_RERANKER_L2 = 1.0e-3
 ORACLE_RERANKER_WEIGHT_CAP = 25.0
 SYNTHETIC_RERANKER_TOKENS = int(os.environ.get("DETOK_SYNTHETIC_RERANKER_TOKENS", "100000"))
 SYNTHETIC_RERANKER_REF_TOKENS = int(os.environ.get("DETOK_SYNTHETIC_RERANKER_REF_TOKENS", "500000"))
-SYNTHETIC_RERANKER_TASKS = ("mixed", "merge", "split")
+SYNTHETIC_RERANKER_TASKS = tuple(
+    item.strip()
+    for item in os.environ.get("DETOK_SYNTHETIC_RERANKER_TASKS", "mixed,merge,split").split(",")
+    if item.strip()
+)
 SYNTHETIC_RERANKER_MIN_TOP1_GAIN = 0.03
 
 LAST_FINAL_EDGES: list[tuple[float, int, int]] = []
@@ -1476,6 +1480,8 @@ def oracle_reranker_diagnostic_main() -> None:
 
 
 def synthetic_mode_probs(mode: str) -> tuple[float, float, float]:
+    if mode.startswith("identity"):
+        return 0.0, 0.0, 0.0
     if mode == "merge":
         return 0.28, 0.06, 0.06
     if mode == "split":
