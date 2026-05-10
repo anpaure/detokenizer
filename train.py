@@ -51,12 +51,6 @@ def effective_candidate_window(num_cipher_tokens: int) -> int:
     return 25_000 if num_cipher_tokens >= 1_000_000 else CANDIDATE_WINDOW
 
 
-def candidate_window_for_round(num_cipher_tokens: int, round_idx: int, rounds: int) -> int:
-    if num_cipher_tokens < 1_000_000:
-        return CANDIDATE_WINDOW
-    return 10_000 if round_idx >= rounds // 2 else 25_000
-
-
 def effective_rounds(num_cipher_tokens: int) -> int:
     return 8 if num_cipher_tokens >= 1_000_000 else ROUNDS
 
@@ -154,9 +148,9 @@ def topk_edges(
 def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_size: int) -> np.ndarray:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device: {device}", flush=True)
+    candidate_window = effective_candidate_window(len(cipher_ids))
     rounds = effective_rounds(len(cipher_ids))
-    candidate_windows = [candidate_window_for_round(len(cipher_ids), i, rounds) for i in range(rounds)]
-    print(f"candidate_window: {candidate_windows[0]}->{candidate_windows[-1]}", flush=True)
+    print(f"candidate_window: {candidate_window}", flush=True)
     c_counts = counts(cipher_ids, int(max(target_vocab_size, int(cipher_ids.max()) + 1)))
     p_counts = counts(ref_ids, target_vocab_size)
     c_order_all = np.argsort(-c_counts)
@@ -174,14 +168,9 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
     p_rank[p_order_all] = np.arange(target_vocab_size)
 
     for round_idx in range(rounds):
-        candidate_window = candidate_windows[round_idx]
         c_anchors = c_focus[: min(ANCHORS, len(c_focus))]
         p_anchors = mapping[c_anchors]
-        print(
-            f"round {round_idx + 1}/{rounds}: focus={len(c_focus)} anchors={len(c_anchors)} "
-            f"window={candidate_window}",
-            flush=True,
-        )
+        print(f"round {round_idx + 1}/{rounds}: focus={len(c_focus)} anchors={len(c_anchors)}", flush=True)
         with torch.no_grad():
             c_left, c_right = torch_context_maps(cipher_ids, c_focus, c_anchors, device)
             p_left, p_right = torch_context_maps(ref_ids, p_focus, p_anchors, device)
@@ -250,10 +239,6 @@ def main() -> None:
         "top_tokens": TOP_TOKENS,
         "anchors": ANCHORS,
         "candidate_window": effective_candidate_window(len(task.cipher_ids)),
-        "candidate_window_schedule": [
-            candidate_window_for_round(len(task.cipher_ids), i, effective_rounds(len(task.cipher_ids)))
-            for i in range(effective_rounds(len(task.cipher_ids)))
-        ],
         "rounds": effective_rounds(len(task.cipher_ids)),
         "freq_weight": FREQ_WEIGHT,
         "torch_topk": TORCH_TOPK,
