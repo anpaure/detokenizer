@@ -139,6 +139,11 @@ def topk_edges(
 def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_size: int) -> np.ndarray:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device: {device}", flush=True)
+    observed_cipher_vocab = int(cipher_ids.max()) + 1
+    anchor_limit = ANCHORS
+    if observed_cipher_vocab > int(target_vocab_size * 1.10):
+        anchor_limit = min(anchor_limit, 4_096)
+    print(f"observed_cipher_vocab: {observed_cipher_vocab} anchor_limit: {anchor_limit}", flush=True)
     c_counts = counts(cipher_ids, int(max(target_vocab_size, int(cipher_ids.max()) + 1)))
     p_counts = counts(ref_ids, target_vocab_size)
     c_order_all = np.argsort(-c_counts)
@@ -156,7 +161,7 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
     p_rank[p_order_all] = np.arange(target_vocab_size)
 
     for round_idx in range(ROUNDS):
-        c_anchors = c_focus[: min(ANCHORS, len(c_focus))]
+        c_anchors = c_focus[: min(anchor_limit, len(c_focus))]
         p_anchors = mapping[c_anchors]
         print(f"round {round_idx + 1}/{ROUNDS}: focus={len(c_focus)} anchors={len(c_anchors)}", flush=True)
         with torch.no_grad():
