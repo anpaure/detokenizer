@@ -56,7 +56,7 @@ DYNAMIC_ANCHOR_MAX_TOKENS = 100_000
 
 
 def effective_candidate_window(num_cipher_tokens: int) -> int:
-    return 25_000 if num_cipher_tokens >= 100_000 else CANDIDATE_WINDOW
+    return 25_000 if num_cipher_tokens >= 1_000_000 else CANDIDATE_WINDOW
 
 
 def effective_rounds(num_cipher_tokens: int) -> int:
