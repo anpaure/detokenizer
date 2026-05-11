@@ -20,229 +20,230 @@
 <text x="74" y="90.0" text-anchor="end" class="tiny">0.589</text>
 <line x1="86.0" y1="86" x2="86.0" y2="476" class="grid"/>
 <text x="86.0" y="498" text-anchor="middle" class="tiny">0</text>
-<line x1="267.4" y1="86" x2="267.4" y2="476" class="grid"/>
-<text x="267.4" y="498" text-anchor="middle" class="tiny">32</text>
-<line x1="448.9" y1="86" x2="448.9" y2="476" class="grid"/>
-<text x="448.9" y="498" text-anchor="middle" class="tiny">64</text>
-<line x1="630.3" y1="86" x2="630.3" y2="476" class="grid"/>
-<text x="630.3" y="498" text-anchor="middle" class="tiny">96</text>
-<line x1="811.7" y1="86" x2="811.7" y2="476" class="grid"/>
-<text x="811.7" y="498" text-anchor="middle" class="tiny">128</text>
-<line x1="993.1" y1="86" x2="993.1" y2="476" class="grid"/>
-<text x="993.1" y="498" text-anchor="middle" class="tiny">160</text>
-<line x1="1174.6" y1="86" x2="1174.6" y2="476" class="grid"/>
-<text x="1174.6" y="498" text-anchor="middle" class="tiny">192</text>
+<line x1="266.6" y1="86" x2="266.6" y2="476" class="grid"/>
+<text x="266.6" y="498" text-anchor="middle" class="tiny">32</text>
+<line x1="447.2" y1="86" x2="447.2" y2="476" class="grid"/>
+<text x="447.2" y="498" text-anchor="middle" class="tiny">64</text>
+<line x1="627.9" y1="86" x2="627.9" y2="476" class="grid"/>
+<text x="627.9" y="498" text-anchor="middle" class="tiny">96</text>
+<line x1="814.1" y1="86" x2="814.1" y2="476" class="grid"/>
+<text x="814.1" y="498" text-anchor="middle" class="tiny">129</text>
+<line x1="994.8" y1="86" x2="994.8" y2="476" class="grid"/>
+<text x="994.8" y="498" text-anchor="middle" class="tiny">161</text>
+<line x1="1175.4" y1="86" x2="1175.4" y2="476" class="grid"/>
+<text x="1175.4" y="498" text-anchor="middle" class="tiny">193</text>
 <line x1="1356.0" y1="86" x2="1356.0" y2="476" class="grid"/>
-<text x="1356.0" y="498" text-anchor="middle" class="tiny">224</text>
+<text x="1356.0" y="498" text-anchor="middle" class="tiny">225</text>
 <line x1="86" y1="476" x2="1356" y2="476" class="axis"/>
 <line x1="86" y1="86" x2="86" y2="476" class="axis"/>
 <circle cx="86.0" cy="113.9" r="3.8" fill="#2563eb" class="keep"><title>0 core-100k keep mean=0.551740: baseline 100k core suite</title></circle>
-<circle cx="91.7" cy="114.6" r="3.8" fill="#2563eb" class="discard"><title>1 core-100k discard mean=0.550788: 4096 anchors low-data test</title></circle>
-<circle cx="108.7" cy="113.5" r="3.8" fill="#2563eb" class="discard"><title>4 core-100k discard mean=0.552256: torch_topk_128</title></circle>
-<circle cx="114.3" cy="113.7" r="3.8" fill="#2563eb" class="discard"><title>5 core-100k discard mean=0.552060: adaptive anchors for oversized cipher vocab</title></circle>
-<circle cx="131.4" cy="112.9" r="3.8" fill="#2563eb" class="discard"><title>8 core-100k discard mean=0.553000: candidate_window_25000</title></circle>
-<circle cx="137.0" cy="114.0" r="3.8" fill="#2563eb" class="keep"><title>9 core-100k keep mean=0.551616: scale-aware candidate window</title></circle>
-<circle cx="165.4" cy="114.4" r="3.8" fill="#2563eb" class="discard"><title>14 core-100k discard mean=0.551052: eight_refinement_rounds</title></circle>
-<circle cx="171.0" cy="114.1" r="3.8" fill="#2563eb" class="keep"><title>15 core-100k keep mean=0.551484: final scale-aware window and rounds</title></circle>
-<circle cx="216.4" cy="114.2" r="3.8" fill="#2563eb" class="keep"><title>23 core-100k keep mean=0.551288: skip context refactor guard at small scale</title></circle>
-<circle cx="239.1" cy="114.0" r="3.8" fill="#2563eb" class="keep"><title>27 core-100k keep mean=0.551568: full skip weight small-scale guard; skip inactive</title></circle>
-<circle cx="261.8" cy="114.1" r="3.8" fill="#2563eb" class="keep"><title>31 core-100k keep mean=0.551400: learned skip weight small-scale guard; skip inactive</title></circle>
-<circle cx="312.8" cy="143.7" r="3.8" fill="#2563eb" class="keep"><title>40 core-100k keep mean=0.511912: enable learned skip context at 100k</title></circle>
-<circle cx="324.1" cy="142.3" r="3.8" fill="#2563eb" class="discard"><title>42 core-100k discard mean=0.513796: eight rounds at 100k worsened learned skip-context</title></circle>
-<circle cx="329.8" cy="143.1" r="3.8" fill="#2563eb" class="discard"><title>43 core-100k discard mean=0.512716: wide candidate window at 100k improved max but worsened mean</title></circle>
-<circle cx="335.5" cy="153.5" r="3.8" fill="#2563eb" class="keep"><title>44 core-100k keep mean=0.498820: dynamic anchor refresh improves low-data alignment</title></circle>
-<circle cx="346.8" cy="153.5" r="3.8" fill="#2563eb" class="keep"><title>46 core-100k keep mean=0.498820: gate dynamic anchor refresh to 100k</title></circle>
-<circle cx="358.1" cy="152.1" r="3.8" fill="#2563eb" class="discard"><title>48 core-100k discard mean=0.500644: wide candidate window worsened dynamic-anchor 100k suite</title></circle>
-<circle cx="363.8" cy="152.8" r="3.8" fill="#2563eb" class="discard"><title>49 core-100k discard mean=0.499752: assignment-margin anchor refresh worsened low-data suite</title></circle>
-<circle cx="369.5" cy="151.6" r="3.8" fill="#2563eb" class="discard"><title>50 core-100k discard mean=0.501332: freezing dynamic anchors after early rounds worsened low-data suite</title></circle>
-<circle cx="386.5" cy="153.8" r="3.8" fill="#2563eb" class="discard"><title>53 core-100k discard mean=0.498456: learned dynamic block weights marginally improved mean but added disproportionate complexity</title></circle>
-<circle cx="392.2" cy="152.1" r="3.8" fill="#2563eb" class="discard"><title>54 core-100k discard mean=0.500752: static left-context downweighting regressed low-data suite</title></circle>
-<circle cx="403.5" cy="155.7" r="3.8" fill="#2563eb" class="discard"><title>56 core-100k discard mean=0.495868: assignment swap repair improved mean but regressed max hard pair</title></circle>
-<circle cx="409.2" cy="155.9" r="3.8" fill="#2563eb" class="keep"><title>57 core-100k keep mean=0.495560: thresholded assignment swap repair improves low-data mean and max without hard-pair regression</title></circle>
-<circle cx="414.8" cy="155.5" r="3.8" fill="#2563eb" class="discard"><title>58 core-100k discard mean=0.496196: stricter swap margin helped easy pairs but regressed hard-pair max and suite mean</title></circle>
-<circle cx="420.5" cy="156.4" r="3.8" fill="#2563eb" class="discard"><title>59 core-100k discard mean=0.494888: midpoint swap margin improved mean but overfit easy pairs and regressed hard-pair max</title></circle>
-<circle cx="437.5" cy="154.1" r="3.8" fill="#2563eb" class="discard"><title>62 core-100k discard mean=0.498080: byte-LM local reranker improved max and fluency but overrepaired Mistral/MiMo and worsened mean</title></circle>
-<circle cx="448.9" cy="164.0" r="3.8" fill="#2563eb" class="keep"><title>64 core-100k keep mean=0.484740: direct token-bigram objective refinement improves low-data mean and max across tokenizer pairs</title></circle>
-<circle cx="460.2" cy="167.7" r="3.8" fill="#2563eb" class="keep"><title>66 core-100k keep mean=0.479844: 50k direct-bigram swap proposals further improve low-data mean and max</title></circle>
-<circle cx="465.9" cy="171.5" r="3.8" fill="#2563eb" class="keep"><title>67 core-100k keep mean=0.474732: 100k direct-bigram swap proposals improve all low-data tokenizer pairs</title></circle>
-<circle cx="471.5" cy="178.3" r="3.8" fill="#2563eb" class="keep"><title>68 core-100k keep mean=0.465648: two direct-bigram refinement passes improve every low-data tokenizer pair</title></circle>
-<circle cx="477.2" cy="180.1" r="3.8" fill="#2563eb" class="keep"><title>69 core-100k keep mean=0.463248: third direct-bigram refinement pass improves aggregate and hard-pair max despite one easy-pair regression</title></circle>
-<circle cx="482.9" cy="182.2" r="3.8" fill="#2563eb" class="keep"><title>70 core-100k keep mean=0.460496: four direct-bigram refinement passes improve every low-data tokenizer pair over the third pass</title></circle>
-<circle cx="664.3" cy="172.9" r="3.8" fill="#2563eb" class="discard"><title>102 core-100k discard mean=0.472880: fixed-context bigram swap objective worsened low-data suite despite broader neighbor evidence</title></circle>
-<circle cx="670.0" cy="173.2" r="3.8" fill="#2563eb" class="discard"><title>103 core-100k discard mean=0.472496: repair-closure node selection overfit proposed swaps and worsened low-data suite</title></circle>
-<path d="M 86.0 113.9 L 137.0 114.0 L 171.0 114.1 L 216.4 114.2 L 312.8 143.7 L 335.5 153.5 L 346.8 153.5 L 409.2 155.9 L 448.9 164.0 L 460.2 167.7 L 465.9 171.5 L 471.5 178.3 L 477.2 180.1 L 482.9 182.2" class="line" stroke="#2563eb"/>
+<circle cx="91.6" cy="114.6" r="3.8" fill="#2563eb" class="discard"><title>1 core-100k discard mean=0.550788: 4096 anchors low-data test</title></circle>
+<circle cx="108.6" cy="113.5" r="3.8" fill="#2563eb" class="discard"><title>4 core-100k discard mean=0.552256: torch_topk_128</title></circle>
+<circle cx="114.2" cy="113.7" r="3.8" fill="#2563eb" class="discard"><title>5 core-100k discard mean=0.552060: adaptive anchors for oversized cipher vocab</title></circle>
+<circle cx="131.2" cy="112.9" r="3.8" fill="#2563eb" class="discard"><title>8 core-100k discard mean=0.553000: candidate_window_25000</title></circle>
+<circle cx="136.8" cy="114.0" r="3.8" fill="#2563eb" class="keep"><title>9 core-100k keep mean=0.551616: scale-aware candidate window</title></circle>
+<circle cx="165.0" cy="114.4" r="3.8" fill="#2563eb" class="discard"><title>14 core-100k discard mean=0.551052: eight_refinement_rounds</title></circle>
+<circle cx="170.7" cy="114.1" r="3.8" fill="#2563eb" class="keep"><title>15 core-100k keep mean=0.551484: final scale-aware window and rounds</title></circle>
+<circle cx="215.8" cy="114.2" r="3.8" fill="#2563eb" class="keep"><title>23 core-100k keep mean=0.551288: skip context refactor guard at small scale</title></circle>
+<circle cx="238.4" cy="114.0" r="3.8" fill="#2563eb" class="keep"><title>27 core-100k keep mean=0.551568: full skip weight small-scale guard; skip inactive</title></circle>
+<circle cx="261.0" cy="114.1" r="3.8" fill="#2563eb" class="keep"><title>31 core-100k keep mean=0.551400: learned skip weight small-scale guard; skip inactive</title></circle>
+<circle cx="311.8" cy="143.7" r="3.8" fill="#2563eb" class="keep"><title>40 core-100k keep mean=0.511912: enable learned skip context at 100k</title></circle>
+<circle cx="323.1" cy="142.3" r="3.8" fill="#2563eb" class="discard"><title>42 core-100k discard mean=0.513796: eight rounds at 100k worsened learned skip-context</title></circle>
+<circle cx="328.7" cy="143.1" r="3.8" fill="#2563eb" class="discard"><title>43 core-100k discard mean=0.512716: wide candidate window at 100k improved max but worsened mean</title></circle>
+<circle cx="334.4" cy="153.5" r="3.8" fill="#2563eb" class="keep"><title>44 core-100k keep mean=0.498820: dynamic anchor refresh improves low-data alignment</title></circle>
+<circle cx="345.6" cy="153.5" r="3.8" fill="#2563eb" class="keep"><title>46 core-100k keep mean=0.498820: gate dynamic anchor refresh to 100k</title></circle>
+<circle cx="356.9" cy="152.1" r="3.8" fill="#2563eb" class="discard"><title>48 core-100k discard mean=0.500644: wide candidate window worsened dynamic-anchor 100k suite</title></circle>
+<circle cx="362.6" cy="152.8" r="3.8" fill="#2563eb" class="discard"><title>49 core-100k discard mean=0.499752: assignment-margin anchor refresh worsened low-data suite</title></circle>
+<circle cx="368.2" cy="151.6" r="3.8" fill="#2563eb" class="discard"><title>50 core-100k discard mean=0.501332: freezing dynamic anchors after early rounds worsened low-data suite</title></circle>
+<circle cx="385.2" cy="153.8" r="3.8" fill="#2563eb" class="discard"><title>53 core-100k discard mean=0.498456: learned dynamic block weights marginally improved mean but added disproportionate complexity</title></circle>
+<circle cx="390.8" cy="152.1" r="3.8" fill="#2563eb" class="discard"><title>54 core-100k discard mean=0.500752: static left-context downweighting regressed low-data suite</title></circle>
+<circle cx="402.1" cy="155.7" r="3.8" fill="#2563eb" class="discard"><title>56 core-100k discard mean=0.495868: assignment swap repair improved mean but regressed max hard pair</title></circle>
+<circle cx="407.7" cy="155.9" r="3.8" fill="#2563eb" class="keep"><title>57 core-100k keep mean=0.495560: thresholded assignment swap repair improves low-data mean and max without hard-pair regression</title></circle>
+<circle cx="413.4" cy="155.5" r="3.8" fill="#2563eb" class="discard"><title>58 core-100k discard mean=0.496196: stricter swap margin helped easy pairs but regressed hard-pair max and suite mean</title></circle>
+<circle cx="419.0" cy="156.4" r="3.8" fill="#2563eb" class="discard"><title>59 core-100k discard mean=0.494888: midpoint swap margin improved mean but overfit easy pairs and regressed hard-pair max</title></circle>
+<circle cx="436.0" cy="154.1" r="3.8" fill="#2563eb" class="discard"><title>62 core-100k discard mean=0.498080: byte-LM local reranker improved max and fluency but overrepaired Mistral/MiMo and worsened mean</title></circle>
+<circle cx="447.2" cy="164.0" r="3.8" fill="#2563eb" class="keep"><title>64 core-100k keep mean=0.484740: direct token-bigram objective refinement improves low-data mean and max across tokenizer pairs</title></circle>
+<circle cx="458.5" cy="167.7" r="3.8" fill="#2563eb" class="keep"><title>66 core-100k keep mean=0.479844: 50k direct-bigram swap proposals further improve low-data mean and max</title></circle>
+<circle cx="464.2" cy="171.5" r="3.8" fill="#2563eb" class="keep"><title>67 core-100k keep mean=0.474732: 100k direct-bigram swap proposals improve all low-data tokenizer pairs</title></circle>
+<circle cx="469.8" cy="178.3" r="3.8" fill="#2563eb" class="keep"><title>68 core-100k keep mean=0.465648: two direct-bigram refinement passes improve every low-data tokenizer pair</title></circle>
+<circle cx="475.5" cy="180.1" r="3.8" fill="#2563eb" class="keep"><title>69 core-100k keep mean=0.463248: third direct-bigram refinement pass improves aggregate and hard-pair max despite one easy-pair regression</title></circle>
+<circle cx="481.1" cy="182.2" r="3.8" fill="#2563eb" class="keep"><title>70 core-100k keep mean=0.460496: four direct-bigram refinement passes improve every low-data tokenizer pair over the third pass</title></circle>
+<circle cx="661.7" cy="172.9" r="3.8" fill="#2563eb" class="discard"><title>102 core-100k discard mean=0.472880: fixed-context bigram swap objective worsened low-data suite despite broader neighbor evidence</title></circle>
+<circle cx="667.4" cy="173.2" r="3.8" fill="#2563eb" class="discard"><title>103 core-100k discard mean=0.472496: repair-closure node selection overfit proposed swaps and worsened low-data suite</title></circle>
+<path d="M 86.0 113.9 L 136.8 114.0 L 170.7 114.1 L 215.8 114.2 L 311.8 143.7 L 334.4 153.5 L 345.6 153.5 L 407.7 155.9 L 447.2 164.0 L 458.5 167.7 L 464.2 171.5 L 469.8 178.3 L 475.5 180.1 L 481.1 182.2" class="line" stroke="#2563eb"/>
 <circle cx="86.0" cy="113.9" r="5.0" fill="#fff" stroke="#2563eb" stroke-width="2"><title>core-100k best=0.551740 at 06af84f: baseline 100k core suite</title></circle>
-<circle cx="137.0" cy="114.0" r="5.0" fill="#fff" stroke="#2563eb" stroke-width="2"><title>core-100k best=0.551616 at 9077a93: scale-aware candidate window</title></circle>
-<circle cx="171.0" cy="114.1" r="5.0" fill="#fff" stroke="#2563eb" stroke-width="2"><title>core-100k best=0.551484 at 9de6b0b: final scale-aware window and rounds</title></circle>
-<circle cx="216.4" cy="114.2" r="5.0" fill="#fff" stroke="#2563eb" stroke-width="2"><title>core-100k best=0.551288 at 01fd299: skip context refactor guard at small scale</title></circle>
-<circle cx="312.8" cy="143.7" r="5.0" fill="#fff" stroke="#2563eb" stroke-width="2"><title>core-100k best=0.511912 at b347529: enable learned skip context at 100k</title></circle>
-<circle cx="335.5" cy="153.5" r="5.0" fill="#fff" stroke="#2563eb" stroke-width="2"><title>core-100k best=0.498820 at 37a7f48: dynamic anchor refresh improves low-data alignment</title></circle>
-<circle cx="346.8" cy="153.5" r="5.0" fill="#fff" stroke="#2563eb" stroke-width="2"><title>core-100k best=0.498820 at a94c494: gate dynamic anchor refresh to 100k</title></circle>
-<circle cx="409.2" cy="155.9" r="5.0" fill="#fff" stroke="#2563eb" stroke-width="2"><title>core-100k best=0.495560 at 4fd8a2d: thresholded assignment swap repair improves low-data mean and max without hard-pair regression</title></circle>
-<circle cx="448.9" cy="164.0" r="5.0" fill="#fff" stroke="#2563eb" stroke-width="2"><title>core-100k best=0.484740 at 4171fec: direct token-bigram objective refinement improves low-data mean and max across tokenizer pairs</title></circle>
-<circle cx="460.2" cy="167.7" r="5.0" fill="#fff" stroke="#2563eb" stroke-width="2"><title>core-100k best=0.479844 at 73905eb: 50k direct-bigram swap proposals further improve low-data mean and max</title></circle>
-<circle cx="465.9" cy="171.5" r="5.0" fill="#fff" stroke="#2563eb" stroke-width="2"><title>core-100k best=0.474732 at a4a247e: 100k direct-bigram swap proposals improve all low-data tokenizer pairs</title></circle>
-<circle cx="471.5" cy="178.3" r="5.0" fill="#fff" stroke="#2563eb" stroke-width="2"><title>core-100k best=0.465648 at 64dcb88: two direct-bigram refinement passes improve every low-data tokenizer pair</title></circle>
-<circle cx="477.2" cy="180.1" r="5.0" fill="#fff" stroke="#2563eb" stroke-width="2"><title>core-100k best=0.463248 at bba0e66: third direct-bigram refinement pass improves aggregate and hard-pair max despite one easy-pair regression</title></circle>
-<circle cx="482.9" cy="182.2" r="5.0" fill="#fff" stroke="#2563eb" stroke-width="2"><title>core-100k best=0.460496 at 19feac4: four direct-bigram refinement passes improve every low-data tokenizer pair over the third pass</title></circle>
-<text x="491.9" y="174.2" text-anchor="start" font-size="13" font-weight="700" fill="#2563eb">core-100k 0.460</text>
-<circle cx="120.0" cy="268.6" r="3.8" fill="#059669" class="keep"><title>6 core-1m keep mean=0.345124: baseline 1m core suite</title></circle>
-<circle cx="125.7" cy="268.8" r="3.8" fill="#059669" class="keep"><title>7 core-1m keep mean=0.344772: candidate_window_25000</title></circle>
-<circle cx="142.7" cy="271.0" r="3.8" fill="#059669" class="keep"><title>10 core-1m keep mean=0.341820: scale-aware candidate window</title></circle>
-<circle cx="148.4" cy="271.0" r="3.8" fill="#059669" class="discard"><title>11 core-1m discard mean=0.341848: large_sample_window_20000</title></circle>
-<circle cx="159.7" cy="272.0" r="3.8" fill="#059669" class="keep"><title>13 core-1m keep mean=0.340460: eight_refinement_rounds</title></circle>
-<circle cx="176.7" cy="271.9" r="3.8" fill="#059669" class="keep"><title>16 core-1m keep mean=0.340636: final scale-aware window and rounds</title></circle>
-<circle cx="193.7" cy="271.2" r="3.8" fill="#059669" class="discard"><title>19 core-1m discard mean=0.341584: include current mapping edge</title></circle>
-<circle cx="210.7" cy="283.8" r="3.8" fill="#059669" class="keep"><title>22 core-1m keep mean=0.324816: skip distance-2 context features for large samples</title></circle>
-<circle cx="227.7" cy="294.2" r="3.8" fill="#059669" class="keep"><title>25 core-1m keep mean=0.310860: full weight distance-2 context</title></circle>
-<circle cx="250.4" cy="309.2" r="3.8" fill="#059669" class="keep"><title>29 core-1m keep mean=0.290864: learn skip-context weight from anchor pairs</title></circle>
-<circle cx="318.5" cy="308.3" r="3.8" fill="#059669" class="keep"><title>41 core-1m keep mean=0.292092: enable learned skip context at 100k; 1m guard</title></circle>
-<circle cx="341.1" cy="302.5" r="3.8" fill="#059669" class="discard"><title>45 core-1m discard mean=0.299716: dynamic anchor refresh regressed 1m guard</title></circle>
-<circle cx="545.2" cy="315.4" r="3.8" fill="#059669" class="keep"><title>81 core-1m keep mean=0.282488: all-scale direct bigram refinement improves 1m mean and max while preserving 100k path</title></circle>
-<circle cx="562.3" cy="320.6" r="3.8" fill="#059669" class="keep"><title>84 core-1m keep mean=0.275664: 4096-token high-data bigram refinement improves every 1m core pair</title></circle>
-<circle cx="584.9" cy="323.7" r="3.8" fill="#059669" class="keep"><title>88 core-1m keep mean=0.271432: 8192-token 1m block improves mean but slightly regresses Mistral max and runtime</title></circle>
-<circle cx="590.6" cy="322.6" r="3.8" fill="#059669" class="discard"><title>89 core-1m discard mean=0.272864: 6144-token 1m block improved runtime and max but lost too much mean CER versus 8192</title></circle>
-<circle cx="613.3" cy="324.6" r="3.8" fill="#059669" class="keep"><title>93 core-1m keep mean=0.270288: three 1m bigram passes improve mean max and runtime versus four passes</title></circle>
-<circle cx="630.3" cy="325.4" r="3.8" fill="#059669" class="keep"><title>96 core-1m keep mean=0.269164: mixing distance-2 bigrams into 1m refinement improves mean max and BPB</title></circle>
-<circle cx="641.6" cy="324.8" r="3.8" fill="#059669" class="discard"><title>98 core-1m discard mean=0.270004: quarter-weight skip bigrams improved BPB but lost mean CER versus half weight</title></circle>
-<circle cx="653.0" cy="326.7" r="3.8" fill="#059669" class="keep"><title>100 core-1m keep mean=0.267432: 0.4 skip-bigram weight improves 1m mean and max versus accepted half-weight setting</title></circle>
-<path d="M 120.0 268.6 L 125.7 268.8 L 142.7 271.0 L 159.7 272.0 L 210.7 283.8 L 227.7 294.2 L 250.4 309.2 L 545.2 315.4 L 562.3 320.6 L 584.9 323.7 L 613.3 324.6 L 630.3 325.4 L 653.0 326.7" class="line" stroke="#059669"/>
-<circle cx="120.0" cy="268.6" r="5.0" fill="#fff" stroke="#059669" stroke-width="2"><title>core-1m best=0.345124 at e2a4926: baseline 1m core suite</title></circle>
-<circle cx="125.7" cy="268.8" r="5.0" fill="#fff" stroke="#059669" stroke-width="2"><title>core-1m best=0.344772 at 8b2e813: candidate_window_25000</title></circle>
-<circle cx="142.7" cy="271.0" r="5.0" fill="#fff" stroke="#059669" stroke-width="2"><title>core-1m best=0.341820 at 9077a93: scale-aware candidate window</title></circle>
-<circle cx="159.7" cy="272.0" r="5.0" fill="#fff" stroke="#059669" stroke-width="2"><title>core-1m best=0.340460 at 6523b60: eight_refinement_rounds</title></circle>
-<circle cx="210.7" cy="283.8" r="5.0" fill="#fff" stroke="#059669" stroke-width="2"><title>core-1m best=0.324816 at 01fd299: skip distance-2 context features for large samples</title></circle>
-<circle cx="227.7" cy="294.2" r="5.0" fill="#fff" stroke="#059669" stroke-width="2"><title>core-1m best=0.310860 at c1f8856: full weight distance-2 context</title></circle>
-<circle cx="250.4" cy="309.2" r="5.0" fill="#fff" stroke="#059669" stroke-width="2"><title>core-1m best=0.290864 at c740b36: learn skip-context weight from anchor pairs</title></circle>
-<circle cx="545.2" cy="315.4" r="5.0" fill="#fff" stroke="#059669" stroke-width="2"><title>core-1m best=0.282488 at 2fdf74b: all-scale direct bigram refinement improves 1m mean and max while preserving 100k path</title></circle>
-<circle cx="562.3" cy="320.6" r="5.0" fill="#fff" stroke="#059669" stroke-width="2"><title>core-1m best=0.275664 at c9312dc: 4096-token high-data bigram refinement improves every 1m core pair</title></circle>
-<circle cx="584.9" cy="323.7" r="5.0" fill="#fff" stroke="#059669" stroke-width="2"><title>core-1m best=0.271432 at 1225617: 8192-token 1m block improves mean but slightly regresses Mistral max and runtime</title></circle>
-<circle cx="613.3" cy="324.6" r="5.0" fill="#fff" stroke="#059669" stroke-width="2"><title>core-1m best=0.270288 at c3b4157: three 1m bigram passes improve mean max and runtime versus four passes</title></circle>
-<circle cx="630.3" cy="325.4" r="5.0" fill="#fff" stroke="#059669" stroke-width="2"><title>core-1m best=0.269164 at 587459a: mixing distance-2 bigrams into 1m refinement improves mean max and BPB</title></circle>
-<circle cx="653.0" cy="326.7" r="5.0" fill="#fff" stroke="#059669" stroke-width="2"><title>core-1m best=0.267432 at 0052f5c: 0.4 skip-bigram weight improves 1m mean and max versus accepted half-weight setting</title></circle>
-<text x="662.0" y="318.7" text-anchor="start" font-size="13" font-weight="700" fill="#059669">core-1m 0.267</text>
-<circle cx="154.0" cy="384.3" r="3.8" fill="#dc2626" class="keep"><title>12 core-10m-3pair keep mean=0.190540: scale-aware candidate window validation</title></circle>
-<circle cx="182.4" cy="385.4" r="3.8" fill="#dc2626" class="keep"><title>17 core-10m-3pair keep mean=0.188973: final scale-aware window and rounds</title></circle>
-<circle cx="222.1" cy="401.4" r="3.8" fill="#dc2626" class="keep"><title>24 core-10m-3pair keep mean=0.167713: skip distance-2 context features for large samples</title></circle>
-<circle cx="233.4" cy="406.8" r="3.8" fill="#dc2626" class="keep"><title>26 core-10m-3pair keep mean=0.160420: full weight distance-2 context</title></circle>
-<circle cx="256.1" cy="447.1" r="3.8" fill="#dc2626" class="keep"><title>30 core-10m-3pair keep mean=0.106620: learn skip-context weight from anchor pairs</title></circle>
-<circle cx="550.9" cy="449.1" r="3.8" fill="#dc2626" class="keep"><title>82 core-10m-3pair keep mean=0.103953: all-scale direct bigram refinement improves 10m mean with small Qwen max regression</title></circle>
-<circle cx="556.6" cy="449.1" r="3.8" fill="#dc2626" class="discard"><title>83 core-10m-3pair discard mean=0.103960: two bigram passes at 10m slightly improved max but worsened mean and BPB</title></circle>
-<circle cx="567.9" cy="447.5" r="3.8" fill="#dc2626" class="discard"><title>85 core-10m-3pair discard mean=0.106133: 4096-token high-data block regressed 10m mean despite slight Qwen max improvement</title></circle>
-<circle cx="573.6" cy="449.1" r="3.8" fill="#dc2626" class="keep"><title>86 core-10m-3pair keep mean=0.103947: gating 4096-token block to 1m restores 10m mean and keeps improved max</title></circle>
-<path d="M 154.0 384.3 L 182.4 385.4 L 222.1 401.4 L 233.4 406.8 L 256.1 447.1 L 550.9 449.1 L 573.6 449.1" class="line" stroke="#dc2626"/>
-<circle cx="154.0" cy="384.3" r="5.0" fill="#fff" stroke="#dc2626" stroke-width="2"><title>core-10m-3pair best=0.190540 at 7f416c1: scale-aware candidate window validation</title></circle>
-<circle cx="182.4" cy="385.4" r="5.0" fill="#fff" stroke="#dc2626" stroke-width="2"><title>core-10m-3pair best=0.188973 at 9de6b0b: final scale-aware window and rounds</title></circle>
-<circle cx="222.1" cy="401.4" r="5.0" fill="#fff" stroke="#dc2626" stroke-width="2"><title>core-10m-3pair best=0.167713 at 01fd299: skip distance-2 context features for large samples</title></circle>
-<circle cx="233.4" cy="406.8" r="5.0" fill="#fff" stroke="#dc2626" stroke-width="2"><title>core-10m-3pair best=0.160420 at c1f8856: full weight distance-2 context</title></circle>
-<circle cx="256.1" cy="447.1" r="5.0" fill="#fff" stroke="#dc2626" stroke-width="2"><title>core-10m-3pair best=0.106620 at c740b36: learn skip-context weight from anchor pairs</title></circle>
-<circle cx="550.9" cy="449.1" r="5.0" fill="#fff" stroke="#dc2626" stroke-width="2"><title>core-10m-3pair best=0.103953 at 2fdf74b: all-scale direct bigram refinement improves 10m mean with small Qwen max regression</title></circle>
-<circle cx="573.6" cy="449.1" r="5.0" fill="#fff" stroke="#dc2626" stroke-width="2"><title>core-10m-3pair best=0.103947 at a14628b: gating 4096-token block to 1m restores 10m mean and keeps improved max</title></circle>
-<text x="582.6" y="441.1" text-anchor="start" font-size="13" font-weight="700" fill="#dc2626">core-10m-3pair 0.104</text>
+<circle cx="136.8" cy="114.0" r="5.0" fill="#fff" stroke="#2563eb" stroke-width="2"><title>core-100k best=0.551616 at 9077a93: scale-aware candidate window</title></circle>
+<circle cx="170.7" cy="114.1" r="5.0" fill="#fff" stroke="#2563eb" stroke-width="2"><title>core-100k best=0.551484 at 9de6b0b: final scale-aware window and rounds</title></circle>
+<circle cx="215.8" cy="114.2" r="5.0" fill="#fff" stroke="#2563eb" stroke-width="2"><title>core-100k best=0.551288 at 01fd299: skip context refactor guard at small scale</title></circle>
+<circle cx="311.8" cy="143.7" r="5.0" fill="#fff" stroke="#2563eb" stroke-width="2"><title>core-100k best=0.511912 at b347529: enable learned skip context at 100k</title></circle>
+<circle cx="334.4" cy="153.5" r="5.0" fill="#fff" stroke="#2563eb" stroke-width="2"><title>core-100k best=0.498820 at 37a7f48: dynamic anchor refresh improves low-data alignment</title></circle>
+<circle cx="345.6" cy="153.5" r="5.0" fill="#fff" stroke="#2563eb" stroke-width="2"><title>core-100k best=0.498820 at a94c494: gate dynamic anchor refresh to 100k</title></circle>
+<circle cx="407.7" cy="155.9" r="5.0" fill="#fff" stroke="#2563eb" stroke-width="2"><title>core-100k best=0.495560 at 4fd8a2d: thresholded assignment swap repair improves low-data mean and max without hard-pair regression</title></circle>
+<circle cx="447.2" cy="164.0" r="5.0" fill="#fff" stroke="#2563eb" stroke-width="2"><title>core-100k best=0.484740 at 4171fec: direct token-bigram objective refinement improves low-data mean and max across tokenizer pairs</title></circle>
+<circle cx="458.5" cy="167.7" r="5.0" fill="#fff" stroke="#2563eb" stroke-width="2"><title>core-100k best=0.479844 at 73905eb: 50k direct-bigram swap proposals further improve low-data mean and max</title></circle>
+<circle cx="464.2" cy="171.5" r="5.0" fill="#fff" stroke="#2563eb" stroke-width="2"><title>core-100k best=0.474732 at a4a247e: 100k direct-bigram swap proposals improve all low-data tokenizer pairs</title></circle>
+<circle cx="469.8" cy="178.3" r="5.0" fill="#fff" stroke="#2563eb" stroke-width="2"><title>core-100k best=0.465648 at 64dcb88: two direct-bigram refinement passes improve every low-data tokenizer pair</title></circle>
+<circle cx="475.5" cy="180.1" r="5.0" fill="#fff" stroke="#2563eb" stroke-width="2"><title>core-100k best=0.463248 at bba0e66: third direct-bigram refinement pass improves aggregate and hard-pair max despite one easy-pair regression</title></circle>
+<circle cx="481.1" cy="182.2" r="5.0" fill="#fff" stroke="#2563eb" stroke-width="2"><title>core-100k best=0.460496 at 19feac4: four direct-bigram refinement passes improve every low-data tokenizer pair over the third pass</title></circle>
+<text x="490.1" y="174.2" text-anchor="start" font-size="13" font-weight="700" fill="#2563eb">core-100k 0.460</text>
+<circle cx="119.9" cy="268.6" r="3.8" fill="#059669" class="keep"><title>6 core-1m keep mean=0.345124: baseline 1m core suite</title></circle>
+<circle cx="125.5" cy="268.8" r="3.8" fill="#059669" class="keep"><title>7 core-1m keep mean=0.344772: candidate_window_25000</title></circle>
+<circle cx="142.4" cy="271.0" r="3.8" fill="#059669" class="keep"><title>10 core-1m keep mean=0.341820: scale-aware candidate window</title></circle>
+<circle cx="148.1" cy="271.0" r="3.8" fill="#059669" class="discard"><title>11 core-1m discard mean=0.341848: large_sample_window_20000</title></circle>
+<circle cx="159.4" cy="272.0" r="3.8" fill="#059669" class="keep"><title>13 core-1m keep mean=0.340460: eight_refinement_rounds</title></circle>
+<circle cx="176.3" cy="271.9" r="3.8" fill="#059669" class="keep"><title>16 core-1m keep mean=0.340636: final scale-aware window and rounds</title></circle>
+<circle cx="193.2" cy="271.2" r="3.8" fill="#059669" class="discard"><title>19 core-1m discard mean=0.341584: include current mapping edge</title></circle>
+<circle cx="210.2" cy="283.8" r="3.8" fill="#059669" class="keep"><title>22 core-1m keep mean=0.324816: skip distance-2 context features for large samples</title></circle>
+<circle cx="227.1" cy="294.2" r="3.8" fill="#059669" class="keep"><title>25 core-1m keep mean=0.310860: full weight distance-2 context</title></circle>
+<circle cx="249.7" cy="309.2" r="3.8" fill="#059669" class="keep"><title>29 core-1m keep mean=0.290864: learn skip-context weight from anchor pairs</title></circle>
+<circle cx="317.4" cy="308.3" r="3.8" fill="#059669" class="keep"><title>41 core-1m keep mean=0.292092: enable learned skip context at 100k; 1m guard</title></circle>
+<circle cx="340.0" cy="302.5" r="3.8" fill="#059669" class="discard"><title>45 core-1m discard mean=0.299716: dynamic anchor refresh regressed 1m guard</title></circle>
+<circle cx="543.2" cy="315.4" r="3.8" fill="#059669" class="keep"><title>81 core-1m keep mean=0.282488: all-scale direct bigram refinement improves 1m mean and max while preserving 100k path</title></circle>
+<circle cx="560.1" cy="320.6" r="3.8" fill="#059669" class="keep"><title>84 core-1m keep mean=0.275664: 4096-token high-data bigram refinement improves every 1m core pair</title></circle>
+<circle cx="582.7" cy="323.7" r="3.8" fill="#059669" class="keep"><title>88 core-1m keep mean=0.271432: 8192-token 1m block improves mean but slightly regresses Mistral max and runtime</title></circle>
+<circle cx="588.4" cy="322.6" r="3.8" fill="#059669" class="discard"><title>89 core-1m discard mean=0.272864: 6144-token 1m block improved runtime and max but lost too much mean CER versus 8192</title></circle>
+<circle cx="610.9" cy="324.6" r="3.8" fill="#059669" class="keep"><title>93 core-1m keep mean=0.270288: three 1m bigram passes improve mean max and runtime versus four passes</title></circle>
+<circle cx="627.9" cy="325.4" r="3.8" fill="#059669" class="keep"><title>96 core-1m keep mean=0.269164: mixing distance-2 bigrams into 1m refinement improves mean max and BPB</title></circle>
+<circle cx="639.2" cy="324.8" r="3.8" fill="#059669" class="discard"><title>98 core-1m discard mean=0.270004: quarter-weight skip bigrams improved BPB but lost mean CER versus half weight</title></circle>
+<circle cx="650.4" cy="326.7" r="3.8" fill="#059669" class="keep"><title>100 core-1m keep mean=0.267432: 0.4 skip-bigram weight improves 1m mean and max versus accepted half-weight setting</title></circle>
+<path d="M 119.9 268.6 L 125.5 268.8 L 142.4 271.0 L 159.4 272.0 L 210.2 283.8 L 227.1 294.2 L 249.7 309.2 L 543.2 315.4 L 560.1 320.6 L 582.7 323.7 L 610.9 324.6 L 627.9 325.4 L 650.4 326.7" class="line" stroke="#059669"/>
+<circle cx="119.9" cy="268.6" r="5.0" fill="#fff" stroke="#059669" stroke-width="2"><title>core-1m best=0.345124 at e2a4926: baseline 1m core suite</title></circle>
+<circle cx="125.5" cy="268.8" r="5.0" fill="#fff" stroke="#059669" stroke-width="2"><title>core-1m best=0.344772 at 8b2e813: candidate_window_25000</title></circle>
+<circle cx="142.4" cy="271.0" r="5.0" fill="#fff" stroke="#059669" stroke-width="2"><title>core-1m best=0.341820 at 9077a93: scale-aware candidate window</title></circle>
+<circle cx="159.4" cy="272.0" r="5.0" fill="#fff" stroke="#059669" stroke-width="2"><title>core-1m best=0.340460 at 6523b60: eight_refinement_rounds</title></circle>
+<circle cx="210.2" cy="283.8" r="5.0" fill="#fff" stroke="#059669" stroke-width="2"><title>core-1m best=0.324816 at 01fd299: skip distance-2 context features for large samples</title></circle>
+<circle cx="227.1" cy="294.2" r="5.0" fill="#fff" stroke="#059669" stroke-width="2"><title>core-1m best=0.310860 at c1f8856: full weight distance-2 context</title></circle>
+<circle cx="249.7" cy="309.2" r="5.0" fill="#fff" stroke="#059669" stroke-width="2"><title>core-1m best=0.290864 at c740b36: learn skip-context weight from anchor pairs</title></circle>
+<circle cx="543.2" cy="315.4" r="5.0" fill="#fff" stroke="#059669" stroke-width="2"><title>core-1m best=0.282488 at 2fdf74b: all-scale direct bigram refinement improves 1m mean and max while preserving 100k path</title></circle>
+<circle cx="560.1" cy="320.6" r="5.0" fill="#fff" stroke="#059669" stroke-width="2"><title>core-1m best=0.275664 at c9312dc: 4096-token high-data bigram refinement improves every 1m core pair</title></circle>
+<circle cx="582.7" cy="323.7" r="5.0" fill="#fff" stroke="#059669" stroke-width="2"><title>core-1m best=0.271432 at 1225617: 8192-token 1m block improves mean but slightly regresses Mistral max and runtime</title></circle>
+<circle cx="610.9" cy="324.6" r="5.0" fill="#fff" stroke="#059669" stroke-width="2"><title>core-1m best=0.270288 at c3b4157: three 1m bigram passes improve mean max and runtime versus four passes</title></circle>
+<circle cx="627.9" cy="325.4" r="5.0" fill="#fff" stroke="#059669" stroke-width="2"><title>core-1m best=0.269164 at 587459a: mixing distance-2 bigrams into 1m refinement improves mean max and BPB</title></circle>
+<circle cx="650.4" cy="326.7" r="5.0" fill="#fff" stroke="#059669" stroke-width="2"><title>core-1m best=0.267432 at 0052f5c: 0.4 skip-bigram weight improves 1m mean and max versus accepted half-weight setting</title></circle>
+<text x="659.4" y="318.7" text-anchor="start" font-size="13" font-weight="700" fill="#059669">core-1m 0.267</text>
+<circle cx="153.7" cy="384.3" r="3.8" fill="#dc2626" class="keep"><title>12 core-10m-3pair keep mean=0.190540: scale-aware candidate window validation</title></circle>
+<circle cx="182.0" cy="385.4" r="3.8" fill="#dc2626" class="keep"><title>17 core-10m-3pair keep mean=0.188973: final scale-aware window and rounds</title></circle>
+<circle cx="221.5" cy="401.4" r="3.8" fill="#dc2626" class="keep"><title>24 core-10m-3pair keep mean=0.167713: skip distance-2 context features for large samples</title></circle>
+<circle cx="232.8" cy="406.8" r="3.8" fill="#dc2626" class="keep"><title>26 core-10m-3pair keep mean=0.160420: full weight distance-2 context</title></circle>
+<circle cx="255.3" cy="447.1" r="3.8" fill="#dc2626" class="keep"><title>30 core-10m-3pair keep mean=0.106620: learn skip-context weight from anchor pairs</title></circle>
+<circle cx="548.8" cy="449.1" r="3.8" fill="#dc2626" class="keep"><title>82 core-10m-3pair keep mean=0.103953: all-scale direct bigram refinement improves 10m mean with small Qwen max regression</title></circle>
+<circle cx="554.5" cy="449.1" r="3.8" fill="#dc2626" class="discard"><title>83 core-10m-3pair discard mean=0.103960: two bigram passes at 10m slightly improved max but worsened mean and BPB</title></circle>
+<circle cx="565.8" cy="447.5" r="3.8" fill="#dc2626" class="discard"><title>85 core-10m-3pair discard mean=0.106133: 4096-token high-data block regressed 10m mean despite slight Qwen max improvement</title></circle>
+<circle cx="571.4" cy="449.1" r="3.8" fill="#dc2626" class="keep"><title>86 core-10m-3pair keep mean=0.103947: gating 4096-token block to 1m restores 10m mean and keeps improved max</title></circle>
+<path d="M 153.7 384.3 L 182.0 385.4 L 221.5 401.4 L 232.8 406.8 L 255.3 447.1 L 548.8 449.1 L 571.4 449.1" class="line" stroke="#dc2626"/>
+<circle cx="153.7" cy="384.3" r="5.0" fill="#fff" stroke="#dc2626" stroke-width="2"><title>core-10m-3pair best=0.190540 at 7f416c1: scale-aware candidate window validation</title></circle>
+<circle cx="182.0" cy="385.4" r="5.0" fill="#fff" stroke="#dc2626" stroke-width="2"><title>core-10m-3pair best=0.188973 at 9de6b0b: final scale-aware window and rounds</title></circle>
+<circle cx="221.5" cy="401.4" r="5.0" fill="#fff" stroke="#dc2626" stroke-width="2"><title>core-10m-3pair best=0.167713 at 01fd299: skip distance-2 context features for large samples</title></circle>
+<circle cx="232.8" cy="406.8" r="5.0" fill="#fff" stroke="#dc2626" stroke-width="2"><title>core-10m-3pair best=0.160420 at c1f8856: full weight distance-2 context</title></circle>
+<circle cx="255.3" cy="447.1" r="5.0" fill="#fff" stroke="#dc2626" stroke-width="2"><title>core-10m-3pair best=0.106620 at c740b36: learn skip-context weight from anchor pairs</title></circle>
+<circle cx="548.8" cy="449.1" r="5.0" fill="#fff" stroke="#dc2626" stroke-width="2"><title>core-10m-3pair best=0.103953 at 2fdf74b: all-scale direct bigram refinement improves 10m mean with small Qwen max regression</title></circle>
+<circle cx="571.4" cy="449.1" r="5.0" fill="#fff" stroke="#dc2626" stroke-width="2"><title>core-10m-3pair best=0.103947 at a14628b: gating 4096-token block to 1m restores 10m mean and keeps improved max</title></circle>
+<text x="580.4" y="441.1" text-anchor="start" font-size="13" font-weight="700" fill="#dc2626">core-10m-3pair 0.104</text>
 
 <text x="86" y="540" font-size="17" font-weight="700">Targeted main-unshuffled screens</text>
 <line x1="86" y1="830.0" x2="1356" y2="830.0" class="grid"/>
 <text x="74" y="834.0" text-anchor="end" class="tiny">0.102</text>
 <line x1="86" y1="776.0" x2="1356" y2="776.0" class="grid"/>
-<text x="74" y="780.0" text-anchor="end" class="tiny">0.145</text>
+<text x="74" y="780.0" text-anchor="end" class="tiny">0.176</text>
 <line x1="86" y1="722.0" x2="1356" y2="722.0" class="grid"/>
-<text x="74" y="726.0" text-anchor="end" class="tiny">0.187</text>
+<text x="74" y="726.0" text-anchor="end" class="tiny">0.250</text>
 <line x1="86" y1="668.0" x2="1356" y2="668.0" class="grid"/>
-<text x="74" y="672.0" text-anchor="end" class="tiny">0.230</text>
+<text x="74" y="672.0" text-anchor="end" class="tiny">0.324</text>
 <line x1="86" y1="614.0" x2="1356" y2="614.0" class="grid"/>
-<text x="74" y="618.0" text-anchor="end" class="tiny">0.273</text>
+<text x="74" y="618.0" text-anchor="end" class="tiny">0.398</text>
 <line x1="86" y1="560.0" x2="1356" y2="560.0" class="grid"/>
-<text x="74" y="564.0" text-anchor="end" class="tiny">0.316</text>
+<text x="74" y="564.0" text-anchor="end" class="tiny">0.472</text>
 <line x1="86.0" y1="560" x2="86.0" y2="830" class="grid"/>
 <text x="86.0" y="852" text-anchor="middle" class="tiny">0</text>
-<line x1="267.4" y1="560" x2="267.4" y2="830" class="grid"/>
-<text x="267.4" y="852" text-anchor="middle" class="tiny">32</text>
-<line x1="448.9" y1="560" x2="448.9" y2="830" class="grid"/>
-<text x="448.9" y="852" text-anchor="middle" class="tiny">64</text>
-<line x1="630.3" y1="560" x2="630.3" y2="830" class="grid"/>
-<text x="630.3" y="852" text-anchor="middle" class="tiny">96</text>
-<line x1="811.7" y1="560" x2="811.7" y2="830" class="grid"/>
-<text x="811.7" y="852" text-anchor="middle" class="tiny">128</text>
-<line x1="993.1" y1="560" x2="993.1" y2="830" class="grid"/>
-<text x="993.1" y="852" text-anchor="middle" class="tiny">160</text>
-<line x1="1174.6" y1="560" x2="1174.6" y2="830" class="grid"/>
-<text x="1174.6" y="852" text-anchor="middle" class="tiny">192</text>
+<line x1="266.6" y1="560" x2="266.6" y2="830" class="grid"/>
+<text x="266.6" y="852" text-anchor="middle" class="tiny">32</text>
+<line x1="447.2" y1="560" x2="447.2" y2="830" class="grid"/>
+<text x="447.2" y="852" text-anchor="middle" class="tiny">64</text>
+<line x1="627.9" y1="560" x2="627.9" y2="830" class="grid"/>
+<text x="627.9" y="852" text-anchor="middle" class="tiny">96</text>
+<line x1="814.1" y1="560" x2="814.1" y2="830" class="grid"/>
+<text x="814.1" y="852" text-anchor="middle" class="tiny">129</text>
+<line x1="994.8" y1="560" x2="994.8" y2="830" class="grid"/>
+<text x="994.8" y="852" text-anchor="middle" class="tiny">161</text>
+<line x1="1175.4" y1="560" x2="1175.4" y2="830" class="grid"/>
+<text x="1175.4" y="852" text-anchor="middle" class="tiny">193</text>
 <line x1="1356.0" y1="560" x2="1356.0" y2="830" class="grid"/>
-<text x="1356.0" y="852" text-anchor="middle" class="tiny">224</text>
+<text x="1356.0" y="852" text-anchor="middle" class="tiny">225</text>
 <line x1="86" y1="830" x2="1356" y2="830" class="axis"/>
 <line x1="86" y1="560" x2="86" y2="830" class="axis"/>
-<circle cx="1066.8" cy="582.3" r="4.0" fill="#7c3aed" class="discard"><title>173 gemma-o200k-1m-unshuffled-lock192-seed diagnostic mean=0.298040: true unshuffled low-ID lock plus structural anchors improves 1m but is weaker than adding structural features</title></circle>
-<circle cx="1106.5" cy="590.5" r="4.0" fill="#7c3aed" class="discard"><title>180 mainu-gemma-o200k-1m-l192-seed-feat005 diagnostic mean=0.291580: structural feature regularization improves the lock192 1m branch but lock128 features are better</title></circle>
-<circle cx="1129.2" cy="589.2" r="4.0" fill="#7c3aed" class="discard"><title>184 mainu-gemma-o200k-1m-l128-seed diagnostic mean=0.292580: lock128 without structural features improves over lock192 but is not best</title></circle>
-<circle cx="1151.9" cy="586.5" r="4.0" fill="#7c3aed" class="discard"><title>188 mainu-gemma-o200k-1m-l256-seed discard mean=0.294740: lock256 is too wide for Gemma to o200k at 1m</title></circle>
-<circle cx="1174.6" cy="578.9" r="4.0" fill="#7c3aed" class="discard"><title>192 mainu-gemma-o200k-1m-l192-seed-feat005-w010 discard mean=0.300720: id proximity weight 0.10 over-regularizes Gemma to o200k at 1m</title></circle>
-<circle cx="1180.2" cy="587.8" r="4.0" fill="#7c3aed" class="discard"><title>193 mainu-gemma-o200k-1m-l192-seed-feat005-w002 discard mean=0.293740: id proximity weight 0.02 is too weak for the Gemma 1m feature branch</title></circle>
-<circle cx="1225.6" cy="593.9" r="4.0" fill="#7c3aed" class="keep"><title>201 mainu-gemma-o200k-1m-l128-seed-feat005 keep mean=0.288880: best Gemma to o200k 1m result: narrower low-ID lock plus structural feature regularization</title></circle>
-<circle cx="1231.3" cy="587.9" r="4.0" fill="#7c3aed" class="discard"><title>202 mainu-gemma-o200k-1m-l160-seed-feat005 discard mean=0.293600: lock160 with structural features is worse than lock128 at Gemma 1m</title></circle>
-<circle cx="1236.9" cy="592.1" r="4.0" fill="#7c3aed" class="discard"><title>203 mainu-gemma-o200k-1m-l224-seed-feat005 diagnostic mean=0.290300: lock224 with structural features is close but worse than lock128 at Gemma 1m</title></circle>
-<circle cx="1282.3" cy="592.2" r="4.0" fill="#7c3aed" class="discard"><title>211 mainu-gemma-o200k-1m-l128-seed-feat005-anneal0802 discard mean=0.290240: annealing ID proximity from 0.08 to 0.02 admits late noise and loses versus constant 0.05 on Gemma 1m</title></circle>
-<circle cx="1288.0" cy="591.1" r="4.0" fill="#7c3aed" class="discard"><title>212 mainu-gemma-o200k-1m-l128-seed-feat005-anneal0500 discard mean=0.291080: removing ID proximity by the last round hurts Gemma 1m despite the same structural feature setup</title></circle>
-<path d="M 1066.8 582.3 L 1106.5 590.5 L 1225.6 593.9" class="line" stroke="#7c3aed"/>
-<circle cx="1066.8" cy="582.3" r="5.2" fill="#fff" stroke="#7c3aed" stroke-width="2"><title>Gemma -&gt; o200k 1M best=0.298040 at 56c30af: true unshuffled low-ID lock plus structural anchors improves 1m but is weaker than adding structural features</title></circle>
-<circle cx="1106.5" cy="590.5" r="5.2" fill="#fff" stroke="#7c3aed" stroke-width="2"><title>Gemma -&gt; o200k 1M best=0.291580 at 36ee2dc: structural feature regularization improves the lock192 1m branch but lock128 features are better</title></circle>
-<circle cx="1225.6" cy="593.9" r="5.2" fill="#fff" stroke="#7c3aed" stroke-width="2"><title>Gemma -&gt; o200k 1M best=0.288880 at 36ee2dc: best Gemma to o200k 1m result: narrower low-ID lock plus structural feature regularization</title></circle>
-<text x="1216.6" y="585.9" text-anchor="end" font-size="12" font-weight="700" fill="#7c3aed">Gemma -&gt; o200k 1M 0.289</text>
-<circle cx="1078.2" cy="753.0" r="4.0" fill="#a855f7" class="keep"><title>175 gemma-o200k-10m-unshuffled-lock192-seed keep mean=0.162880: true unshuffled low-ID lock plus structural anchors gives large Gemma to o200k 10m gain</title></circle>
-<circle cx="1117.9" cy="747.1" r="4.0" fill="#a855f7" class="discard"><title>182 mainu-gemma-o200k-10m-l192-seed-feat005 discard mean=0.167560: structural feature regularization hurts Gemma to o200k at 10m</title></circle>
-<circle cx="1140.6" cy="748.2" r="4.0" fill="#a855f7" class="discard"><title>186 mainu-gemma-o200k-10m-l128-seed discard mean=0.166640: lock128 regresses Gemma to o200k at 10m</title></circle>
-<circle cx="1163.2" cy="751.4" r="4.0" fill="#a855f7" class="discard"><title>190 mainu-gemma-o200k-10m-l256-seed diagnostic mean=0.164120: lock256 ties the best retuned 10m widths but remains worse than the prior lock192 baseline</title></circle>
-<circle cx="1185.9" cy="751.3" r="4.0" fill="#a855f7" class="discard"><title>194 mainu-gemma-o200k-10m-l192-seed-w010 diagnostic mean=0.164240: id proximity weight 0.10 is close but does not beat the Gemma 10m baseline</title></circle>
-<circle cx="1191.6" cy="747.8" r="4.0" fill="#a855f7" class="discard"><title>195 mainu-gemma-o200k-10m-l192-seed-w002 discard mean=0.166980: id proximity weight 0.02 regresses Gemma to o200k at 10m</title></circle>
-<circle cx="1242.6" cy="751.4" r="4.0" fill="#a855f7" class="discard"><title>204 mainu-gemma-o200k-10m-l160-seed diagnostic mean=0.164120: lock160 ties lock256 but does not beat the prior lock192 baseline at Gemma 10m</title></circle>
-<circle cx="1248.3" cy="748.7" r="4.0" fill="#a855f7" class="discard"><title>205 mainu-gemma-o200k-10m-l224-seed discard mean=0.166260: lock224 regresses Gemma to o200k at 10m</title></circle>
-<circle cx="1293.6" cy="747.4" r="4.0" fill="#a855f7" class="discard"><title>213 mainu-gemma-o200k-10m-l192-seed-anneal1002 discard mean=0.167320: strong early ID proximity still over-constrains Gemma 10m even when decayed to 0.02</title></circle>
-<circle cx="1299.3" cy="755.1" r="4.0" fill="#a855f7" class="keep"><title>214 mainu-gemma-o200k-10m-l192-seed-anneal0500 keep mean=0.161180: best Gemma to o200k 10m result: use low-ID structure early, then decay smooth ID proximity to zero</title></circle>
-<circle cx="1327.7" cy="755.3" r="4.0" fill="#a855f7" class="discard"><title>219 mainu-gemma-o200k-10m-l192-seed-anneal0500-pow05 diagnostic mean=0.161040: faster ID-prior decay slightly improves Gemma 10m versus linear decay but is weaker than slow decay</title></circle>
-<circle cx="1333.3" cy="758.8" r="4.0" fill="#a855f7" class="keep"><title>220 mainu-gemma-o200k-10m-l192-seed-anneal0500-pow20 keep mean=0.158320: best Gemma to o200k 10m result: keep ID proximity through mid-rounds, then decay quadratically to zero</title></circle>
-<circle cx="1339.0" cy="755.3" r="4.0" fill="#a855f7" class="discard"><title>221 mainu-gemma-o200k-10m-l192-seed-anneal0501 diagnostic mean=0.161040: leaving a small final ID prior ties fast decay but loses to fully removing the late prior</title></circle>
-<circle cx="1344.7" cy="754.7" r="4.0" fill="#a855f7" class="discard"><title>222 mainu-gemma-o200k-10m-l192-seed-anneal0400 discard mean=0.161560: lower initial ID proximity underfits early Gemma 10m alignment versus starting at 0.05</title></circle>
-<circle cx="1350.3" cy="757.9" r="4.0" fill="#a855f7" class="discard"><title>223 mainu-gemma-o200k-10m-l192-seed-anneal0500-pow15 diagnostic mean=0.159000: slower-than-linear ID-prior decay is good, but slightly worse than quadratic timing</title></circle>
-<circle cx="1356.0" cy="756.0" r="4.0" fill="#a855f7" class="discard"><title>224 mainu-gemma-o200k-10m-l192-seed-anneal0500-pow30 discard mean=0.160520: holding the ID prior too long regresses versus the quadratic decay sweet spot</title></circle>
-<path d="M 1078.2 753.0 L 1299.3 755.1 L 1327.7 755.3 L 1333.3 758.8" class="line" stroke="#a855f7"/>
-<circle cx="1078.2" cy="753.0" r="5.2" fill="#fff" stroke="#a855f7" stroke-width="2"><title>Gemma -&gt; o200k 10M best=0.162880 at 56c30af: true unshuffled low-ID lock plus structural anchors gives large Gemma to o200k 10m gain</title></circle>
-<circle cx="1299.3" cy="755.1" r="5.2" fill="#fff" stroke="#a855f7" stroke-width="2"><title>Gemma -&gt; o200k 10M best=0.161180 at d4a585e: best Gemma to o200k 10m result: use low-ID structure early, then decay smooth ID proximity to zero</title></circle>
-<circle cx="1327.7" cy="755.3" r="5.2" fill="#fff" stroke="#a855f7" stroke-width="2"><title>Gemma -&gt; o200k 10M best=0.161040 at d4a585e: faster ID-prior decay slightly improves Gemma 10m versus linear decay but is weaker than slow decay</title></circle>
-<circle cx="1333.3" cy="758.8" r="5.2" fill="#fff" stroke="#a855f7" stroke-width="2"><title>Gemma -&gt; o200k 10M best=0.158320 at d4a585e: best Gemma to o200k 10m result: keep ID proximity through mid-rounds, then decay quadratically to zero</title></circle>
-<text x="1324.3" y="750.8" text-anchor="end" font-size="12" font-weight="700" fill="#a855f7">Gemma -&gt; o200k 10M 0.158</text>
-<circle cx="1089.5" cy="617.1" r="4.0" fill="#ea580c" class="keep"><title>177 o200k-qwen36-1m-unshuffled-lock192-seed keep mean=0.270540: true unshuffled low-ID lock plus structural anchors beats soft frequency-rank prior at 1m</title></circle>
-<circle cx="1112.2" cy="617.2" r="4.0" fill="#ea580c" class="discard"><title>181 mainu-o200k-qwen36-1m-l192-seed-feat005 diagnostic mean=0.270460: structural features barely improve lock192 on qwen 1m; wider locks matter more</title></circle>
-<circle cx="1134.9" cy="612.3" r="4.0" fill="#ea580c" class="discard"><title>185 mainu-o200k-qwen36-1m-l128-seed discard mean=0.274340: lock128 is too narrow for o200k to qwen36 at 1m</title></circle>
-<circle cx="1157.6" cy="624.9" r="4.0" fill="#ea580c" class="discard"><title>189 mainu-o200k-qwen36-1m-l256-seed diagnostic mean=0.264340: lock256 is the right qwen 1m width before weight tuning</title></circle>
-<circle cx="1197.3" cy="618.5" r="4.0" fill="#ea580c" class="discard"><title>196 mainu-o200k-qwen36-1m-l256-seed-w000 discard mean=0.269380: zero id proximity loses the qwen 1m lock256 prior</title></circle>
-<circle cx="1202.9" cy="620.2" r="4.0" fill="#ea580c" class="discard"><title>197 mainu-o200k-qwen36-1m-l256-seed-w001 discard mean=0.268060: id proximity weight 0.01 helps but is not enough for qwen 1m</title></circle>
-<circle cx="1208.6" cy="626.0" r="4.0" fill="#ea580c" class="discard"><title>198 mainu-o200k-qwen36-1m-l256-seed-w010 diagnostic mean=0.263480: id proximity weight 0.10 improves qwen 1m but 0.02 is better</title></circle>
-<circle cx="1214.3" cy="628.1" r="4.0" fill="#ea580c" class="keep"><title>199 mainu-o200k-qwen36-1m-l256-seed-w002 keep mean=0.261800: best o200k to qwen36 1m result from tuned lock256 with light id proximity</title></circle>
-<circle cx="1219.9" cy="625.0" r="4.0" fill="#ea580c" class="discard"><title>200 mainu-o200k-qwen36-1m-l256-seed-w003 discard mean=0.264260: id proximity weight 0.03 regresses versus 0.02 on qwen 1m</title></circle>
-<circle cx="1305.0" cy="627.8" r="4.0" fill="#ea580c" class="discard"><title>215 mainu-o200k-qwen36-1m-l256-seed-anneal1002 diagnostic mean=0.262060: annealing from 0.10 to 0.02 is close but does not beat constant 0.02 on qwen 1m</title></circle>
-<circle cx="1310.6" cy="622.1" r="4.0" fill="#ea580c" class="discard"><title>216 mainu-o200k-qwen36-1m-l256-seed-anneal0501 discard mean=0.266520: decaying qwen 1m below the 0.02 prior loses precision</title></circle>
-<path d="M 1089.5 617.1 L 1112.2 617.2 L 1157.6 624.9 L 1208.6 626.0 L 1214.3 628.1" class="line" stroke="#ea580c"/>
-<circle cx="1089.5" cy="617.1" r="5.2" fill="#fff" stroke="#ea580c" stroke-width="2"><title>o200k -&gt; Qwen36 1M best=0.270540 at 56c30af: true unshuffled low-ID lock plus structural anchors beats soft frequency-rank prior at 1m</title></circle>
-<circle cx="1112.2" cy="617.2" r="5.2" fill="#fff" stroke="#ea580c" stroke-width="2"><title>o200k -&gt; Qwen36 1M best=0.270460 at 36ee2dc: structural features barely improve lock192 on qwen 1m; wider locks matter more</title></circle>
-<circle cx="1157.6" cy="624.9" r="5.2" fill="#fff" stroke="#ea580c" stroke-width="2"><title>o200k -&gt; Qwen36 1M best=0.264340 at 36ee2dc: lock256 is the right qwen 1m width before weight tuning</title></circle>
-<circle cx="1208.6" cy="626.0" r="5.2" fill="#fff" stroke="#ea580c" stroke-width="2"><title>o200k -&gt; Qwen36 1M best=0.263480 at 36ee2dc: id proximity weight 0.10 improves qwen 1m but 0.02 is better</title></circle>
-<circle cx="1214.3" cy="628.1" r="5.2" fill="#fff" stroke="#ea580c" stroke-width="2"><title>o200k -&gt; Qwen36 1M best=0.261800 at 36ee2dc: best o200k to qwen36 1m result from tuned lock256 with light id proximity</title></circle>
-<text x="1205.3" y="620.1" text-anchor="end" font-size="12" font-weight="700" fill="#ea580c">o200k -&gt; Qwen36 1M 0.262</text>
-<circle cx="1100.9" cy="809.8" r="4.0" fill="#f97316" class="keep"><title>179 o200k-qwen36-10m-unshuffled-lock192-seed keep mean=0.117900: true unshuffled low-ID lock plus structural anchors remains best at 10m, but soft rank closes much of the gap</title></circle>
-<circle cx="1123.5" cy="806.3" r="4.0" fill="#f97316" class="discard"><title>183 mainu-o200k-qwen36-10m-l192-seed-feat005 discard mean=0.120680: structural feature regularization hurts o200k to qwen36 at 10m</title></circle>
-<circle cx="1146.2" cy="808.5" r="4.0" fill="#f97316" class="discard"><title>187 mainu-o200k-qwen36-10m-l128-seed diagnostic mean=0.118920: lock128 improves over no run-time retune but remains behind tuned weight</title></circle>
-<circle cx="1168.9" cy="808.7" r="4.0" fill="#f97316" class="discard"><title>191 mainu-o200k-qwen36-10m-l256-seed diagnostic mean=0.118800: lock256 helps but is worse than tuned lock192 weight</title></circle>
-<circle cx="1253.9" cy="806.5" r="4.0" fill="#f97316" class="discard"><title>206 mainu-o200k-qwen36-10m-l192-seed-w000 discard mean=0.120500: zero id proximity is too weak for qwen 10m</title></circle>
-<circle cx="1259.6" cy="806.6" r="4.0" fill="#f97316" class="discard"><title>207 mainu-o200k-qwen36-10m-l192-seed-w001 discard mean=0.120440: id proximity weight 0.01 is still too weak for qwen 10m</title></circle>
-<circle cx="1265.3" cy="810.5" r="4.0" fill="#f97316" class="discard"><title>208 mainu-o200k-qwen36-10m-l192-seed-w010 diagnostic mean=0.117360: id proximity weight 0.10 improves qwen 10m but 0.02 is better</title></circle>
-<circle cx="1271.0" cy="811.1" r="4.0" fill="#f97316" class="keep"><title>209 mainu-o200k-qwen36-10m-l192-seed-w002 keep mean=0.116900: best o200k to qwen36 10m result from light id proximity on lock192</title></circle>
-<circle cx="1276.6" cy="807.2" r="4.0" fill="#f97316" class="discard"><title>210 mainu-o200k-qwen36-10m-l192-seed-w003 discard mean=0.119960: id proximity weight 0.03 regresses versus 0.02 on qwen 10m</title></circle>
-<circle cx="1316.3" cy="803.6" r="4.0" fill="#f97316" class="discard"><title>217 mainu-o200k-qwen36-10m-l192-seed-anneal1002 discard mean=0.122780: strong early ID proximity is actively harmful on qwen 10m even with a 0.02 final weight</title></circle>
-<circle cx="1322.0" cy="804.9" r="4.0" fill="#f97316" class="discard"><title>218 mainu-o200k-qwen36-10m-l192-seed-anneal0501 discard mean=0.121780: decaying qwen 10m below the 0.02 constant prior loses the best light-ID ordering signal</title></circle>
-<path d="M 1100.9 809.8 L 1265.3 810.5 L 1271.0 811.1" class="line" stroke="#f97316"/>
-<circle cx="1100.9" cy="809.8" r="5.2" fill="#fff" stroke="#f97316" stroke-width="2"><title>o200k -&gt; Qwen36 10M best=0.117900 at 56c30af: true unshuffled low-ID lock plus structural anchors remains best at 10m, but soft rank closes much of the gap</title></circle>
-<circle cx="1265.3" cy="810.5" r="5.2" fill="#fff" stroke="#f97316" stroke-width="2"><title>o200k -&gt; Qwen36 10M best=0.117360 at 36ee2dc: id proximity weight 0.10 improves qwen 10m but 0.02 is better</title></circle>
-<circle cx="1271.0" cy="811.1" r="5.2" fill="#fff" stroke="#f97316" stroke-width="2"><title>o200k -&gt; Qwen36 10M best=0.116900 at 36ee2dc: best o200k to qwen36 10m result from light id proximity on lock192</title></circle>
-<text x="1262.0" y="803.1" text-anchor="end" font-size="12" font-weight="700" fill="#f97316">o200k -&gt; Qwen36 10M 0.117</text>
+<circle cx="1062.5" cy="686.8" r="4.0" fill="#7c3aed" class="discard"><title>173 gemma-o200k-1m-unshuffled-lock192-seed diagnostic mean=0.298040: true unshuffled low-ID lock plus structural anchors improves 1m but is weaker than adding structural features</title></circle>
+<circle cx="1102.0" cy="691.5" r="4.0" fill="#7c3aed" class="discard"><title>180 mainu-gemma-o200k-1m-l192-seed-feat005 diagnostic mean=0.291580: structural feature regularization improves the lock192 1m branch but lock128 features are better</title></circle>
+<circle cx="1124.6" cy="690.8" r="4.0" fill="#7c3aed" class="discard"><title>184 mainu-gemma-o200k-1m-l128-seed diagnostic mean=0.292580: lock128 without structural features improves over lock192 but is not best</title></circle>
+<circle cx="1147.2" cy="689.2" r="4.0" fill="#7c3aed" class="discard"><title>188 mainu-gemma-o200k-1m-l256-seed discard mean=0.294740: lock256 is too wide for Gemma to o200k at 1m</title></circle>
+<circle cx="1169.7" cy="684.8" r="4.0" fill="#7c3aed" class="discard"><title>192 mainu-gemma-o200k-1m-l192-seed-feat005-w010 discard mean=0.300720: id proximity weight 0.10 over-regularizes Gemma to o200k at 1m</title></circle>
+<circle cx="1175.4" cy="689.9" r="4.0" fill="#7c3aed" class="discard"><title>193 mainu-gemma-o200k-1m-l192-seed-feat005-w002 discard mean=0.293740: id proximity weight 0.02 is too weak for the Gemma 1m feature branch</title></circle>
+<circle cx="1220.5" cy="693.5" r="4.0" fill="#7c3aed" class="keep"><title>201 mainu-gemma-o200k-1m-l128-seed-feat005 keep mean=0.288880: best Gemma to o200k 1m result: narrower low-ID lock plus structural feature regularization</title></circle>
+<circle cx="1226.2" cy="690.0" r="4.0" fill="#7c3aed" class="discard"><title>202 mainu-gemma-o200k-1m-l160-seed-feat005 discard mean=0.293600: lock160 with structural features is worse than lock128 at Gemma 1m</title></circle>
+<circle cx="1231.8" cy="692.4" r="4.0" fill="#7c3aed" class="discard"><title>203 mainu-gemma-o200k-1m-l224-seed-feat005 diagnostic mean=0.290300: lock224 with structural features is close but worse than lock128 at Gemma 1m</title></circle>
+<circle cx="1277.0" cy="692.5" r="4.0" fill="#7c3aed" class="discard"><title>211 mainu-gemma-o200k-1m-l128-seed-feat005-anneal0802 discard mean=0.290240: annealing ID proximity from 0.08 to 0.02 admits late noise and loses versus constant 0.05 on Gemma 1m</title></circle>
+<circle cx="1282.6" cy="691.9" r="4.0" fill="#7c3aed" class="discard"><title>212 mainu-gemma-o200k-1m-l128-seed-feat005-anneal0500 discard mean=0.291080: removing ID proximity by the last round hurts Gemma 1m despite the same structural feature setup</title></circle>
+<circle cx="1356.0" cy="571.0" r="4.0" fill="#7c3aed" class="discard"><title>225 mainu-gemma-o200k-1m-l128-seed-common4-feat005 discard mean=0.456660: expanding hard structural seeds to of/and/to/a is unsafe and corrupts Gemma 1m assignment</title></circle>
+<path d="M 1062.5 686.8 L 1102.0 691.5 L 1220.5 693.5" class="line" stroke="#7c3aed"/>
+<circle cx="1062.5" cy="686.8" r="5.2" fill="#fff" stroke="#7c3aed" stroke-width="2"><title>Gemma -&gt; o200k 1M best=0.298040 at 56c30af: true unshuffled low-ID lock plus structural anchors improves 1m but is weaker than adding structural features</title></circle>
+<circle cx="1102.0" cy="691.5" r="5.2" fill="#fff" stroke="#7c3aed" stroke-width="2"><title>Gemma -&gt; o200k 1M best=0.291580 at 36ee2dc: structural feature regularization improves the lock192 1m branch but lock128 features are better</title></circle>
+<circle cx="1220.5" cy="693.5" r="5.2" fill="#fff" stroke="#7c3aed" stroke-width="2"><title>Gemma -&gt; o200k 1M best=0.288880 at 36ee2dc: best Gemma to o200k 1m result: narrower low-ID lock plus structural feature regularization</title></circle>
+<text x="1211.5" y="685.5" text-anchor="end" font-size="12" font-weight="700" fill="#7c3aed">Gemma -&gt; o200k 1M 0.289</text>
+<circle cx="1073.8" cy="785.5" r="4.0" fill="#a855f7" class="keep"><title>175 gemma-o200k-10m-unshuffled-lock192-seed keep mean=0.162880: true unshuffled low-ID lock plus structural anchors gives large Gemma to o200k 10m gain</title></circle>
+<circle cx="1113.3" cy="782.1" r="4.0" fill="#a855f7" class="discard"><title>182 mainu-gemma-o200k-10m-l192-seed-feat005 discard mean=0.167560: structural feature regularization hurts Gemma to o200k at 10m</title></circle>
+<circle cx="1135.9" cy="782.7" r="4.0" fill="#a855f7" class="discard"><title>186 mainu-gemma-o200k-10m-l128-seed discard mean=0.166640: lock128 regresses Gemma to o200k at 10m</title></circle>
+<circle cx="1158.4" cy="784.6" r="4.0" fill="#a855f7" class="discard"><title>190 mainu-gemma-o200k-10m-l256-seed diagnostic mean=0.164120: lock256 ties the best retuned 10m widths but remains worse than the prior lock192 baseline</title></circle>
+<circle cx="1181.0" cy="784.5" r="4.0" fill="#a855f7" class="discard"><title>194 mainu-gemma-o200k-10m-l192-seed-w010 diagnostic mean=0.164240: id proximity weight 0.10 is close but does not beat the Gemma 10m baseline</title></circle>
+<circle cx="1186.7" cy="782.5" r="4.0" fill="#a855f7" class="discard"><title>195 mainu-gemma-o200k-10m-l192-seed-w002 discard mean=0.166980: id proximity weight 0.02 regresses Gemma to o200k at 10m</title></circle>
+<circle cx="1237.5" cy="784.6" r="4.0" fill="#a855f7" class="discard"><title>204 mainu-gemma-o200k-10m-l160-seed diagnostic mean=0.164120: lock160 ties lock256 but does not beat the prior lock192 baseline at Gemma 10m</title></circle>
+<circle cx="1243.1" cy="783.0" r="4.0" fill="#a855f7" class="discard"><title>205 mainu-gemma-o200k-10m-l224-seed discard mean=0.166260: lock224 regresses Gemma to o200k at 10m</title></circle>
+<circle cx="1288.3" cy="782.2" r="4.0" fill="#a855f7" class="discard"><title>213 mainu-gemma-o200k-10m-l192-seed-anneal1002 discard mean=0.167320: strong early ID proximity still over-constrains Gemma 10m even when decayed to 0.02</title></circle>
+<circle cx="1293.9" cy="786.7" r="4.0" fill="#a855f7" class="keep"><title>214 mainu-gemma-o200k-10m-l192-seed-anneal0500 keep mean=0.161180: best Gemma to o200k 10m result: use low-ID structure early, then decay smooth ID proximity to zero</title></circle>
+<circle cx="1322.1" cy="786.8" r="4.0" fill="#a855f7" class="discard"><title>219 mainu-gemma-o200k-10m-l192-seed-anneal0500-pow05 diagnostic mean=0.161040: faster ID-prior decay slightly improves Gemma 10m versus linear decay but is weaker than slow decay</title></circle>
+<circle cx="1327.8" cy="788.8" r="4.0" fill="#a855f7" class="keep"><title>220 mainu-gemma-o200k-10m-l192-seed-anneal0500-pow20 keep mean=0.158320: best Gemma to o200k 10m result: keep ID proximity through mid-rounds, then decay quadratically to zero</title></circle>
+<circle cx="1333.4" cy="786.8" r="4.0" fill="#a855f7" class="discard"><title>221 mainu-gemma-o200k-10m-l192-seed-anneal0501 diagnostic mean=0.161040: leaving a small final ID prior ties fast decay but loses to fully removing the late prior</title></circle>
+<circle cx="1339.1" cy="786.4" r="4.0" fill="#a855f7" class="discard"><title>222 mainu-gemma-o200k-10m-l192-seed-anneal0400 discard mean=0.161560: lower initial ID proximity underfits early Gemma 10m alignment versus starting at 0.05</title></circle>
+<circle cx="1344.7" cy="788.3" r="4.0" fill="#a855f7" class="discard"><title>223 mainu-gemma-o200k-10m-l192-seed-anneal0500-pow15 diagnostic mean=0.159000: slower-than-linear ID-prior decay is good, but slightly worse than quadratic timing</title></circle>
+<circle cx="1350.4" cy="787.2" r="4.0" fill="#a855f7" class="discard"><title>224 mainu-gemma-o200k-10m-l192-seed-anneal0500-pow30 discard mean=0.160520: holding the ID prior too long regresses versus the quadratic decay sweet spot</title></circle>
+<path d="M 1073.8 785.5 L 1293.9 786.7 L 1322.1 786.8 L 1327.8 788.8" class="line" stroke="#a855f7"/>
+<circle cx="1073.8" cy="785.5" r="5.2" fill="#fff" stroke="#a855f7" stroke-width="2"><title>Gemma -&gt; o200k 10M best=0.162880 at 56c30af: true unshuffled low-ID lock plus structural anchors gives large Gemma to o200k 10m gain</title></circle>
+<circle cx="1293.9" cy="786.7" r="5.2" fill="#fff" stroke="#a855f7" stroke-width="2"><title>Gemma -&gt; o200k 10M best=0.161180 at d4a585e: best Gemma to o200k 10m result: use low-ID structure early, then decay smooth ID proximity to zero</title></circle>
+<circle cx="1322.1" cy="786.8" r="5.2" fill="#fff" stroke="#a855f7" stroke-width="2"><title>Gemma -&gt; o200k 10M best=0.161040 at d4a585e: faster ID-prior decay slightly improves Gemma 10m versus linear decay but is weaker than slow decay</title></circle>
+<circle cx="1327.8" cy="788.8" r="5.2" fill="#fff" stroke="#a855f7" stroke-width="2"><title>Gemma -&gt; o200k 10M best=0.158320 at d4a585e: best Gemma to o200k 10m result: keep ID proximity through mid-rounds, then decay quadratically to zero</title></circle>
+<text x="1318.8" y="780.8" text-anchor="end" font-size="12" font-weight="700" fill="#a855f7">Gemma -&gt; o200k 10M 0.158</text>
+<circle cx="1085.1" cy="706.9" r="4.0" fill="#ea580c" class="keep"><title>177 o200k-qwen36-1m-unshuffled-lock192-seed keep mean=0.270540: true unshuffled low-ID lock plus structural anchors beats soft frequency-rank prior at 1m</title></circle>
+<circle cx="1107.6" cy="706.9" r="4.0" fill="#ea580c" class="discard"><title>181 mainu-o200k-qwen36-1m-l192-seed-feat005 diagnostic mean=0.270460: structural features barely improve lock192 on qwen 1m; wider locks matter more</title></circle>
+<circle cx="1130.2" cy="704.1" r="4.0" fill="#ea580c" class="discard"><title>185 mainu-o200k-qwen36-1m-l128-seed discard mean=0.274340: lock128 is too narrow for o200k to qwen36 at 1m</title></circle>
+<circle cx="1152.8" cy="711.4" r="4.0" fill="#ea580c" class="discard"><title>189 mainu-o200k-qwen36-1m-l256-seed diagnostic mean=0.264340: lock256 is the right qwen 1m width before weight tuning</title></circle>
+<circle cx="1192.3" cy="707.7" r="4.0" fill="#ea580c" class="discard"><title>196 mainu-o200k-qwen36-1m-l256-seed-w000 discard mean=0.269380: zero id proximity loses the qwen 1m lock256 prior</title></circle>
+<circle cx="1198.0" cy="708.7" r="4.0" fill="#ea580c" class="discard"><title>197 mainu-o200k-qwen36-1m-l256-seed-w001 discard mean=0.268060: id proximity weight 0.01 helps but is not enough for qwen 1m</title></circle>
+<circle cx="1203.6" cy="712.0" r="4.0" fill="#ea580c" class="discard"><title>198 mainu-o200k-qwen36-1m-l256-seed-w010 diagnostic mean=0.263480: id proximity weight 0.10 improves qwen 1m but 0.02 is better</title></circle>
+<circle cx="1209.2" cy="713.2" r="4.0" fill="#ea580c" class="keep"><title>199 mainu-o200k-qwen36-1m-l256-seed-w002 keep mean=0.261800: best o200k to qwen36 1m result from tuned lock256 with light id proximity</title></circle>
+<circle cx="1214.9" cy="711.4" r="4.0" fill="#ea580c" class="discard"><title>200 mainu-o200k-qwen36-1m-l256-seed-w003 discard mean=0.264260: id proximity weight 0.03 regresses versus 0.02 on qwen 1m</title></circle>
+<circle cx="1299.6" cy="713.1" r="4.0" fill="#ea580c" class="discard"><title>215 mainu-o200k-qwen36-1m-l256-seed-anneal1002 diagnostic mean=0.262060: annealing from 0.10 to 0.02 is close but does not beat constant 0.02 on qwen 1m</title></circle>
+<circle cx="1305.2" cy="709.8" r="4.0" fill="#ea580c" class="discard"><title>216 mainu-o200k-qwen36-1m-l256-seed-anneal0501 discard mean=0.266520: decaying qwen 1m below the 0.02 prior loses precision</title></circle>
+<path d="M 1085.1 706.9 L 1107.6 706.9 L 1152.8 711.4 L 1203.6 712.0 L 1209.2 713.2" class="line" stroke="#ea580c"/>
+<circle cx="1085.1" cy="706.9" r="5.2" fill="#fff" stroke="#ea580c" stroke-width="2"><title>o200k -&gt; Qwen36 1M best=0.270540 at 56c30af: true unshuffled low-ID lock plus structural anchors beats soft frequency-rank prior at 1m</title></circle>
+<circle cx="1107.6" cy="706.9" r="5.2" fill="#fff" stroke="#ea580c" stroke-width="2"><title>o200k -&gt; Qwen36 1M best=0.270460 at 36ee2dc: structural features barely improve lock192 on qwen 1m; wider locks matter more</title></circle>
+<circle cx="1152.8" cy="711.4" r="5.2" fill="#fff" stroke="#ea580c" stroke-width="2"><title>o200k -&gt; Qwen36 1M best=0.264340 at 36ee2dc: lock256 is the right qwen 1m width before weight tuning</title></circle>
+<circle cx="1203.6" cy="712.0" r="5.2" fill="#fff" stroke="#ea580c" stroke-width="2"><title>o200k -&gt; Qwen36 1M best=0.263480 at 36ee2dc: id proximity weight 0.10 improves qwen 1m but 0.02 is better</title></circle>
+<circle cx="1209.2" cy="713.2" r="5.2" fill="#fff" stroke="#ea580c" stroke-width="2"><title>o200k -&gt; Qwen36 1M best=0.261800 at 36ee2dc: best o200k to qwen36 1m result from tuned lock256 with light id proximity</title></circle>
+<text x="1200.2" y="705.2" text-anchor="end" font-size="12" font-weight="700" fill="#ea580c">o200k -&gt; Qwen36 1M 0.262</text>
+<circle cx="1096.4" cy="818.3" r="4.0" fill="#f97316" class="keep"><title>179 o200k-qwen36-10m-unshuffled-lock192-seed keep mean=0.117900: true unshuffled low-ID lock plus structural anchors remains best at 10m, but soft rank closes much of the gap</title></circle>
+<circle cx="1118.9" cy="816.3" r="4.0" fill="#f97316" class="discard"><title>183 mainu-o200k-qwen36-10m-l192-seed-feat005 discard mean=0.120680: structural feature regularization hurts o200k to qwen36 at 10m</title></circle>
+<circle cx="1141.5" cy="817.6" r="4.0" fill="#f97316" class="discard"><title>187 mainu-o200k-qwen36-10m-l128-seed diagnostic mean=0.118920: lock128 improves over no run-time retune but remains behind tuned weight</title></circle>
+<circle cx="1164.1" cy="817.7" r="4.0" fill="#f97316" class="discard"><title>191 mainu-o200k-qwen36-10m-l256-seed diagnostic mean=0.118800: lock256 helps but is worse than tuned lock192 weight</title></circle>
+<circle cx="1248.8" cy="816.4" r="4.0" fill="#f97316" class="discard"><title>206 mainu-o200k-qwen36-10m-l192-seed-w000 discard mean=0.120500: zero id proximity is too weak for qwen 10m</title></circle>
+<circle cx="1254.4" cy="816.5" r="4.0" fill="#f97316" class="discard"><title>207 mainu-o200k-qwen36-10m-l192-seed-w001 discard mean=0.120440: id proximity weight 0.01 is still too weak for qwen 10m</title></circle>
+<circle cx="1260.0" cy="818.7" r="4.0" fill="#f97316" class="discard"><title>208 mainu-o200k-qwen36-10m-l192-seed-w010 diagnostic mean=0.117360: id proximity weight 0.10 improves qwen 10m but 0.02 is better</title></circle>
+<circle cx="1265.7" cy="819.0" r="4.0" fill="#f97316" class="keep"><title>209 mainu-o200k-qwen36-10m-l192-seed-w002 keep mean=0.116900: best o200k to qwen36 10m result from light id proximity on lock192</title></circle>
+<circle cx="1271.3" cy="816.8" r="4.0" fill="#f97316" class="discard"><title>210 mainu-o200k-qwen36-10m-l192-seed-w003 discard mean=0.119960: id proximity weight 0.03 regresses versus 0.02 on qwen 10m</title></circle>
+<circle cx="1310.8" cy="814.8" r="4.0" fill="#f97316" class="discard"><title>217 mainu-o200k-qwen36-10m-l192-seed-anneal1002 discard mean=0.122780: strong early ID proximity is actively harmful on qwen 10m even with a 0.02 final weight</title></circle>
+<circle cx="1316.5" cy="815.5" r="4.0" fill="#f97316" class="discard"><title>218 mainu-o200k-qwen36-10m-l192-seed-anneal0501 discard mean=0.121780: decaying qwen 10m below the 0.02 constant prior loses the best light-ID ordering signal</title></circle>
+<path d="M 1096.4 818.3 L 1260.0 818.7 L 1265.7 819.0" class="line" stroke="#f97316"/>
+<circle cx="1096.4" cy="818.3" r="5.2" fill="#fff" stroke="#f97316" stroke-width="2"><title>o200k -&gt; Qwen36 10M best=0.117900 at 56c30af: true unshuffled low-ID lock plus structural anchors remains best at 10m, but soft rank closes much of the gap</title></circle>
+<circle cx="1260.0" cy="818.7" r="5.2" fill="#fff" stroke="#f97316" stroke-width="2"><title>o200k -&gt; Qwen36 10M best=0.117360 at 36ee2dc: id proximity weight 0.10 improves qwen 10m but 0.02 is better</title></circle>
+<circle cx="1265.7" cy="819.0" r="5.2" fill="#fff" stroke="#f97316" stroke-width="2"><title>o200k -&gt; Qwen36 10M best=0.116900 at 36ee2dc: best o200k to qwen36 10m result from light id proximity on lock192</title></circle>
+<text x="1256.7" y="811.0" text-anchor="end" font-size="12" font-weight="700" fill="#f97316">o200k -&gt; Qwen36 10M 0.117</text>
 
 <text x="700" y="858" text-anchor="middle" class="small">Experiment log row index</text>
 <text x="22" y="281" transform="rotate(-90 22 281)" text-anchor="middle" class="small">core mean CER50k</text>

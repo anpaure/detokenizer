@@ -224,3 +224,4 @@ d4a585e	mainu-gemma-o200k-10m-l192-seed-anneal0501	0.161040	0.161040	2.893761	2.
 d4a585e	mainu-gemma-o200k-10m-l192-seed-anneal0400	0.161560	0.161560	2.893205	2.3	discard	lower initial ID proximity underfits early Gemma 10m alignment versus starting at 0.05
 d4a585e	mainu-gemma-o200k-10m-l192-seed-anneal0500-pow15	0.159000	0.159000	2.893595	2.3	diagnostic	slower-than-linear ID-prior decay is good, but slightly worse than quadratic timing
 d4a585e	mainu-gemma-o200k-10m-l192-seed-anneal0500-pow30	0.160520	0.160520	2.911825	2.3	discard	holding the ID prior too long regresses versus the quadratic decay sweet spot
+d4a585e	mainu-gemma-o200k-1m-l128-seed-common4-feat005	0.456660	0.456660	2.919011	3.7	discard	expanding hard structural seeds to of/and/to/a is unsafe and corrupts Gemma 1m assignment
