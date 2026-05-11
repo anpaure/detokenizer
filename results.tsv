@@ -160,3 +160,14 @@ f6344fb	gemma-o200k-100m-unshuffled-lock192	0.118980	0.118980	2.832837	2.4	diagn
 368ca13	gemma-o200k-100m-shuffled-structural-seed	0.169480	0.169480	2.747018	2.4	keep	shuffle-invariant PageRank/entropy anchors survive ID shuffle and improve slim, but cannot recover unshuffled ID-order gains
 368ca13	gemma-o200k-100m-shuffled-structural-seed-features005	0.171500	0.171500	2.745210	2.4	discard	adding low-weight structural features to shuffled hard anchors hurts 100m CER despite slightly better BPB
 368ca13	gemma-o200k-100m-shuffled-structural-features005	0.179620	0.179620	2.778433	2.4	diagnostic	structural feature regularization alone gives a small shuffled 100m gain but is weaker than hard anchors
+0c07f36	gemma-o200k-100m-deshuffle-freq-naive-lock192	0.839880	0.839880	5.332084	2.3	discard	literal frequency-rank renumbering with numeric-ID lock is catastrophic because target IDs are not frequency ranks
+0c07f36	gemma-o200k-100m-deshuffle-freq-rank-lock192	0.786980	0.786980	3.185269	2.4	discard	hard-locking frequency ranks to target frequency ranks also breaks the graph search
+0c07f36	gemma-o200k-100m-deshuffle-freq-rank-lock192-seed	0.662260	0.662260	3.092084	2.4	discard	structural seeds cannot rescue hard frequency-rank locks
+0c07f36	gemma-o200k-100m-deshuffle-freq-rank-soft-w005	0.156560	0.156560	2.757639	2.5	diagnostic	soft frequency-rank proximity improves shuffled slim and structural anchors without hard rank locks
+0c07f36	gemma-o200k-100m-deshuffle-freq-rank-soft-seed-w005	0.174560	0.174560	2.747361	2.5	discard	combining structural hard seeds with frequency-rank pseudo IDs hurts versus the soft rank prior alone
+0c07f36	gemma-o200k-100m-deshuffle-freq-rank-soft-w002	0.179480	0.179480	2.761376	2.4	discard	soft frequency-rank prior weight 0.02 is too weak
+0c07f36	gemma-o200k-100m-deshuffle-freq-rank-soft-w008	0.154280	0.154280	2.760338	2.4	diagnostic	soft frequency-rank prior weight 0.08 is close but weaker than 0.10
+0c07f36	gemma-o200k-100m-deshuffle-freq-rank-soft-w010	0.153180	0.153180	2.756239	2.5	keep	best shuffled-compatible deshuffle result: frequency-rank pseudo IDs as a soft rank-proximity prior, no hard locks
+0c07f36	gemma-o200k-100m-deshuffle-freq-rank-soft-w012	0.211580	0.211580	2.765480	2.4	discard	soft frequency-rank prior weight 0.12 crosses into over-regularization
+0c07f36	gemma-o200k-100m-deshuffle-freq-rank-soft-w015	0.216020	0.216020	2.869298	2.4	discard	soft frequency-rank prior weight 0.15 over-constrains and regresses
+0c07f36	gemma-o200k-100m-deshuffle-freq-rank-soft-w020	0.175960	0.175960	2.749669	2.4	discard	soft frequency-rank prior weight 0.20 is unstable and worse than 0.10
