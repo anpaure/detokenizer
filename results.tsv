@@ -157,3 +157,6 @@ da5b309	gemma-o200k-1m-retok-cem	0.310800	0.310800	2.722635	6.1	diagnostic	retok
 f6344fb	gemma-o200k-100m-combo-lock192-seed-features005	0.125400	0.125400	2.824034	2.5	discard	best 1m combined feature setting improves strongly over slim 100m but structural features hurt at 100m
 f6344fb	gemma-o200k-100m-combo-lock192-seed	0.118700	0.118700	2.826402	2.4	keep	best 100m focused run: unshuffled source IDs with lock192 and structural hard anchors, no structural feature term
 f6344fb	gemma-o200k-100m-unshuffled-lock192	0.118980	0.118980	2.832837	2.4	diagnostic	unshuffled lock192 carries nearly all 100m gain; hard anchors add a small extra improvement
+368ca13	gemma-o200k-100m-shuffled-structural-seed	0.169480	0.169480	2.747018	2.4	keep	shuffle-invariant PageRank/entropy anchors survive ID shuffle and improve slim, but cannot recover unshuffled ID-order gains
+368ca13	gemma-o200k-100m-shuffled-structural-seed-features005	0.171500	0.171500	2.745210	2.4	discard	adding low-weight structural features to shuffled hard anchors hurts 100m CER despite slightly better BPB
+368ca13	gemma-o200k-100m-shuffled-structural-features005	0.179620	0.179620	2.778433	2.4	diagnostic	structural feature regularization alone gives a small shuffled 100m gain but is weaker than hard anchors
