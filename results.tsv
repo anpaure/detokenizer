@@ -225,3 +225,8 @@ d4a585e	mainu-gemma-o200k-10m-l192-seed-anneal0400	0.161560	0.161560	2.893205	2.
 d4a585e	mainu-gemma-o200k-10m-l192-seed-anneal0500-pow15	0.159000	0.159000	2.893595	2.3	diagnostic	slower-than-linear ID-prior decay is good, but slightly worse than quadratic timing
 d4a585e	mainu-gemma-o200k-10m-l192-seed-anneal0500-pow30	0.160520	0.160520	2.911825	2.3	discard	holding the ID prior too long regresses versus the quadratic decay sweet spot
 d4a585e	mainu-gemma-o200k-1m-l128-seed-common4-feat005	0.456660	0.456660	2.919011	3.7	discard	expanding hard structural seeds to of/and/to/a is unsafe and corrupts Gemma 1m assignment
+1a8945b	mainu-gemma-o200k-1m-l128-seed-feat005-crib	0.287500	0.287500	2.863189	3.7	diagnostic	crib repair accepted zero moves; measured current-code rerun improves Gemma 1m but does not validate the crib selector
+1a8945b	mainu-gemma-o200k-10m-l192-seed-anneal0500-pow20-crib	0.161160	0.161160	2.901552	2.4	discard	loose crib repair accepted alpha-to-digit hitchhikers and regressed, motivating source and class guards
+6699e6b	mainu-gemma-o200k-10m-l192-seed-anneal0500-pow20-crib-tight	0.158260	0.158260	2.887742	2.4	keep	tight crib repair accepts one punctuation-newline move and gives a tiny Gemma 10m gain
+6699e6b	mainu-o200k-qwen36-1m-l256-seed-w002-crib-tight	0.266740	0.266740	2.751201	3.5	discard	tight crib repair accepts zero moves and regresses versus the saved qwen 1m baseline
+6699e6b	mainu-o200k-qwen36-10m-l192-seed-w002-crib-tight	0.123300	0.123300	2.752281	2.3	discard	tight crib repair accepts zero moves and regresses versus the saved qwen 10m baseline
