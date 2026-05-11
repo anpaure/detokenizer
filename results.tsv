@@ -154,3 +154,6 @@ da5b309	gemma-o200k-1m-retok-cem	0.310800	0.310800	2.722635	6.1	diagnostic	retok
 2dfbb5e	gemma-o200k-1m-combo-lock128-seed-features005	0.291520	0.291520	2.799524	3.6	diagnostic	narrower low-ID prefix lock is useful but worse than lock192 in the combined setting
 2dfbb5e	gemma-o200k-1m-combo-lock256-seed-features005	0.293920	0.293920	2.794869	3.6	discard	wider low-ID prefix lock over-constrains versus lock192 in the combined setting
 2dfbb5e	gemma-o200k-1m-combo-lock192-seed-features005-noidprox	0.294320	0.294320	2.801407	3.6	discard	removing smooth ID proximity loses much of the combined-branch gain
+f6344fb	gemma-o200k-100m-combo-lock192-seed-features005	0.125400	0.125400	2.824034	2.5	discard	best 1m combined feature setting improves strongly over slim 100m but structural features hurt at 100m
+f6344fb	gemma-o200k-100m-combo-lock192-seed	0.118700	0.118700	2.826402	2.4	keep	best 100m focused run: unshuffled source IDs with lock192 and structural hard anchors, no structural feature term
+f6344fb	gemma-o200k-100m-unshuffled-lock192	0.118980	0.118980	2.832837	2.4	diagnostic	unshuffled lock192 carries nearly all 100m gain; hard anchors add a small extra improvement
