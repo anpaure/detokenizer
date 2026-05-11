@@ -112,3 +112,16 @@ cff784e	qwen36-o200k-100k-screen	0.489720	0.489720	2.762881	6.3	discard	first-or
 abfcbb3	qwen36-o200k-100k-unshuffled-slim	0.469960	0.469960	2.712644	6.3	baseline	unshuffled source-token IDs expose tokenizer structure but slim graph path worsens CER versus shuffled fixture
 abfcbb3	qwen36-o200k-100k-unshuffled-idprox	0.462540	0.462540	2.713391	6.3	keep	light ID-proximity prior uses unshuffled tokenizer order and improves hard screen versus unshuffled slim baseline
 abfcbb3	qwen36-o200k-100k-unshuffled-idprox-window	0.465000	0.465000	2.717038	6.3	discard	adding an ID-distance candidate-window union over-admits noisy candidates and loses versus ID-proximity score only
+ade3fe2	qwen36-o200k-100k-unshuffled-idprox-scaled	0.469840	0.469840	2.727128	6.3	discard	scaled source-to-target ID proximity loses the useful low-ID structural signal
+ade3fe2	qwen36-o200k-100k-unshuffled-scaled-init	0.702780	0.702780	4.290834	6.3	discard	initializing the mapping by scaled raw IDs catastrophically underfits frequency/context evidence
+ade3fe2	qwen36-o200k-100k-unshuffled-exact-id-bonus	0.466500	0.466500	2.713704	6.3	discard	exact-ID bonus overweights sparse identity matches and loses versus smooth ID proximity
+ade3fe2	qwen36-o200k-100k-unshuffled-prefix-lock128	0.461880	0.461880	2.669433	6.3	discard	low-ID prefix lock helps BPB but loses hard-screen CER versus softer ID-proximity baseline
+ade3fe2	qwen36-o200k-100k-unshuffled-prefix-lock192	0.454140	0.454140	2.671462	6.3	diagnostic	locking the shared low-ID byte/punctuation prefix gives a real Qwen hard-screen gain
+ade3fe2	qwen36-o200k-100k-unshuffled-prefix-lock256	0.458020	0.458020	2.673386	6.3	discard	256-token prefix lock is useful but weaker than the 192-token lock
+ade3fe2	qwen36-o200k-100k-unshuffled-prefix-lock512	0.731940	0.731940	3.826803	6.3	discard	over-broad prefix lock forces unrelated BPE merges to identical IDs and breaks decoding
+ade3fe2	mistral-o200k-100k-shuffled-slim	0.460800	0.460800	2.676824	6.3	baseline	shuffled slim comparison for the unshuffled tokenizer-structure branch
+ade3fe2	gemma-o200k-100k-shuffled-slim	0.474920	0.474920	2.698562	6.3	baseline	shuffled slim comparison for the unshuffled tokenizer-structure branch
+ade3fe2	mistral-o200k-100k-unshuffled-prefix-lock192	0.464060	0.464060	2.682097	6.3	discard	Qwen-tuned unshuffled ID prior regresses Mistral versus shuffled slim
+ade3fe2	gemma-o200k-100k-unshuffled-prefix-lock192	0.477180	0.477180	2.795496	6.3	discard	Qwen-tuned low-ID lock regresses Gemma versus shuffled slim despite improving BPB on Qwen
+ade3fe2	gemma-o200k-100k-unshuffled-idprox	0.495940	0.495940	2.668979	6.3	discard	soft ID proximity without prefix lock is especially unsafe for Gemma
+ade3fe2	core-100k-unshuffled-prefix-lock192	0.465127	0.477180	2.716352	6.3	discard	best Qwen structural setting fails broader 100k screen by regressing Mistral and Gemma
