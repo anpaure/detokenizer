@@ -40,6 +40,10 @@ SEED = int(os.environ.get("DETOK_SEED", DEFAULT_SEED))
 UNSHUFFLED_SOURCE_IDS = os.environ.get("DETOK_UNSHUFFLED_SOURCE", "1") == "1"
 ID_PROXIMITY_WEIGHT = float(os.environ.get("DETOK_ID_PROXIMITY_WEIGHT", "0.05"))
 ID_CANDIDATE_WINDOW = int(os.environ.get("DETOK_ID_CANDIDATE_WINDOW", "0"))
+ID_PROXIMITY_MODE = os.environ.get("DETOK_ID_PROXIMITY_MODE", "absolute")
+ID_INIT_MODE = os.environ.get("DETOK_ID_INIT_MODE", "freq")
+ID_EXACT_BONUS = float(os.environ.get("DETOK_ID_EXACT_BONUS", "0.0"))
+ID_LOCK_PREFIX = int(os.environ.get("DETOK_ID_LOCK_PREFIX", "0"))
 
 TOP_TOKENS = 50_000
 ANCHORS = 8_192
@@ -87,6 +91,13 @@ def effective_rounds(num_cipher_tokens: int) -> int:
 
 def counts(ids: np.ndarray, size: int) -> np.ndarray:
     return np.bincount(ids.astype(np.int64, copy=False), minlength=size)
+
+
+def apply_id_lock(mapping: np.ndarray, target_vocab_size: int) -> None:
+    if not (UNSHUFFLED_SOURCE_IDS and ID_LOCK_PREFIX > 0):
+        return
+    limit = min(ID_LOCK_PREFIX, len(mapping), target_vocab_size)
+    mapping[:limit] = np.arange(limit, dtype=np.int64)
 
 
 def torch_context_maps(ids: np.ndarray, focus: np.ndarray, anchors: np.ndarray, device: str, offset: int = 1):
@@ -210,6 +221,7 @@ def topk_edges(
     mapping: np.ndarray,
     p_rank: np.ndarray,
     candidate_window: int,
+    id_scale: float,
     device: str,
 ) -> list[tuple[float, int, int]]:
     p_log_t = torch.as_tensor(p_log[p_focus].astype(np.float32), dtype=torch.float32, device=device)
@@ -227,15 +239,19 @@ def topk_edges(
         id_delta = None
         if UNSHUFFLED_SOURCE_IDS and ID_PROXIMITY_WEIGHT:
             c_id_t = torch.as_tensor(c_ids.astype(np.float32), dtype=torch.float32, device=device)
-            id_delta = torch.abs(c_id_t[:, None] - p_id_t[None, :])
+            id_center = c_id_t * float(id_scale) if ID_PROXIMITY_MODE == "scaled" else c_id_t
+            id_delta = torch.abs(id_center[:, None] - p_id_t[None, :])
             sim -= ID_PROXIMITY_WEIGHT * torch.log1p(id_delta) / id_norm
+            if ID_EXACT_BONUS:
+                sim += ID_EXACT_BONUS * (id_delta == 0).to(torch.float32)
         if candidate_window > 0:
             centers = torch.as_tensor(p_rank[mapping[c_ids]].astype(np.int64), dtype=torch.long, device=device)
             mask = torch.abs(p_rank_t[None, :] - centers[:, None]) <= candidate_window
             if UNSHUFFLED_SOURCE_IDS and ID_CANDIDATE_WINDOW > 0:
                 if id_delta is None:
                     c_id_t = torch.as_tensor(c_ids.astype(np.float32), dtype=torch.float32, device=device)
-                    id_delta = torch.abs(c_id_t[:, None] - p_id_t[None, :])
+                    id_center = c_id_t * float(id_scale) if ID_PROXIMITY_MODE == "scaled" else c_id_t
+                    id_delta = torch.abs(id_center[:, None] - p_id_t[None, :])
                 mask = mask | (id_delta <= float(ID_CANDIDATE_WINDOW))
             sim = sim.masked_fill(~mask, -1.0e9)
         values, indices = torch.topk(sim, k=k, dim=1)
@@ -410,10 +426,19 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
     p_order_all = np.argsort(-p_counts)
     c_focus = c_order_all[: min(TOP_TOKENS, np.count_nonzero(c_counts))].astype(np.int64)
     p_focus = p_order_all[: min(TOP_TOKENS, np.count_nonzero(p_counts))].astype(np.int64)
+    id_scale = target_vocab_size / max(1, len(c_counts))
 
     mapping = np.zeros(max(len(c_counts), target_vocab_size), dtype=np.int64)
     init = c_order_all[: len(p_order_all)]
     mapping[init] = p_order_all[: len(init)]
+    if UNSHUFFLED_SOURCE_IDS and ID_INIT_MODE != "freq":
+        source_ids = np.arange(len(c_counts), dtype=np.float64)
+        if ID_INIT_MODE == "scaled":
+            mapped = np.rint(source_ids * id_scale).astype(np.int64)
+        else:
+            mapped = source_ids.astype(np.int64)
+        mapping[: len(c_counts)] = np.clip(mapped, 0, target_vocab_size - 1)
+    apply_id_lock(mapping, target_vocab_size)
 
     c_log = np.log(np.maximum(c_counts, 1) / max(1, int(c_counts.sum())))
     p_log = np.log(np.maximum(p_counts, 1) / max(1, int(p_counts.sum())))
@@ -472,6 +497,7 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
                 mapping,
                 p_rank,
                 candidate_window,
+                id_scale,
                 device,
             )
             del c_vec, p_vec
@@ -528,6 +554,7 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
         next_mapping = mapping.copy()
         for c, p in assigned_p_by_c.items():
             next_mapping[c] = p
+        apply_id_lock(next_mapping, target_vocab_size)
         mapping = next_mapping
         if round_idx == rounds - 1 and (use_dynamic_anchors or BIGRAM_REFINE_ALL_SCALES):
             mapping = refine_with_bigram_objective(
@@ -539,6 +566,7 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
                 target_vocab_size,
                 p_counts,
             )
+            apply_id_lock(mapping, target_vocab_size)
         if use_dynamic_anchors and len(assigned_scores) >= 64:
             assigned_scores.sort(reverse=True)
             next_anchor_rows: list[int] = []
@@ -603,6 +631,10 @@ def main() -> None:
         "unshuffled_source_ids": UNSHUFFLED_SOURCE_IDS,
         "id_proximity_weight": ID_PROXIMITY_WEIGHT,
         "id_candidate_window": ID_CANDIDATE_WINDOW,
+        "id_proximity_mode": ID_PROXIMITY_MODE,
+        "id_init_mode": ID_INIT_MODE,
+        "id_exact_bonus": ID_EXACT_BONUS,
+        "id_lock_prefix": ID_LOCK_PREFIX,
         "elapsed_seconds": time.time() - t0,
         "metrics": metrics,
         "preview": recovered_sample[:1000],
