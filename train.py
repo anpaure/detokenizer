@@ -1170,6 +1170,23 @@ def crib_repair_candidates(
     return candidates
 
 
+def crib_surface_family(text: str) -> str:
+    cls = surface_class(text)
+    if cls.startswith("leading_space_"):
+        cls = cls[len("leading_space_") :]
+    if cls in {"sentence_punct", "comma", "punct"}:
+        return "punct"
+    if cls in {"alpha", "mixed_alpha"}:
+        return "alpha"
+    if cls == "digit":
+        return "digit"
+    if cls == "newline":
+        return "newline"
+    if cls in {"whitespace", "marker"}:
+        return "space"
+    return cls
+
+
 def precision_crib_repair(
     cipher_ids: np.ndarray,
     mapping: np.ndarray,
@@ -1206,7 +1223,7 @@ def precision_crib_repair(
             new_piece = decode_token_text(target_adapter, p)
             if not new_piece or len(new_piece.encode("utf-8", errors="replace")) > 32:
                 continue
-            if surface_class(old_piece).endswith("punct") != surface_class(new_piece).endswith("punct"):
+            if crib_surface_family(old_piece) != crib_surface_family(new_piece):
                 continue
             gains: list[float] = []
             for pos in sample_positions:
@@ -1231,8 +1248,11 @@ def precision_crib_repair(
     proposals.sort(reverse=True)
     repaired = mapping.copy()
     accepted = 0
+    moved_sources: set[int] = set()
     used_targets = {int(repaired[int(c)]) for c in c_focus}
     for median, p10, positive, c, p, seen_count in proposals:
+        if c in moved_sources:
+            continue
         current = int(repaired[c])
         if current == p:
             continue
@@ -1242,6 +1262,7 @@ def precision_crib_repair(
         if p in used_targets and p != current:
             continue
         repaired[c] = p
+        moved_sources.add(c)
         used_targets.discard(current)
         used_targets.add(p)
         accepted += 1
