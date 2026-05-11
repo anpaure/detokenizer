@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import time
 from pathlib import Path
 
@@ -67,6 +68,18 @@ STRUCTURAL_SEED_COMMON_SURFACES = tuple(
 STRUCTURAL_FEATURES = os.environ.get("DETOK_STRUCTURAL_FEATURES", "0") == "1"
 STRUCTURAL_FEATURE_TOP_N = int(os.environ.get("DETOK_STRUCTURAL_FEATURE_TOP_N", "5000"))
 STRUCTURAL_FEATURE_WEIGHT = float(os.environ.get("DETOK_STRUCTURAL_FEATURE_WEIGHT", "0.25"))
+CRIB_REPAIR = os.environ.get("DETOK_CRIB_REPAIR", "0") == "1"
+CRIB_REPAIR_MAX_TYPES = int(os.environ.get("DETOK_CRIB_REPAIR_MAX_TYPES", "96"))
+CRIB_REPAIR_MAX_CANDIDATES = int(os.environ.get("DETOK_CRIB_REPAIR_MAX_CANDIDATES", "8"))
+CRIB_REPAIR_MIN_OCCURRENCES = int(os.environ.get("DETOK_CRIB_REPAIR_MIN_OCCURRENCES", "24"))
+CRIB_REPAIR_MAX_OCCURRENCES = int(os.environ.get("DETOK_CRIB_REPAIR_MAX_OCCURRENCES", "128"))
+CRIB_REPAIR_CONTEXT = int(os.environ.get("DETOK_CRIB_REPAIR_CONTEXT", "10"))
+CRIB_REPAIR_MAX_ACCEPT = int(os.environ.get("DETOK_CRIB_REPAIR_MAX_ACCEPT", "32"))
+CRIB_REPAIR_MIN_MEDIAN_GAIN = float(os.environ.get("DETOK_CRIB_REPAIR_MIN_MEDIAN_GAIN", "1.0"))
+CRIB_REPAIR_P10_FLOOR = float(os.environ.get("DETOK_CRIB_REPAIR_P10_FLOOR", "-0.5"))
+CRIB_REPAIR_MIN_POSITIVE_FRAC = float(os.environ.get("DETOK_CRIB_REPAIR_MIN_POSITIVE_FRAC", "0.75"))
+CRIB_REPAIR_WORD_BYTES = int(os.environ.get("DETOK_CRIB_REPAIR_WORD_BYTES", "16000000"))
+CRIB_REPAIR_WORD_WEIGHT = float(os.environ.get("DETOK_CRIB_REPAIR_WORD_WEIGHT", "1.0"))
 
 TOP_TOKENS = 50_000
 ANCHORS = 8_192
@@ -742,6 +755,49 @@ def structural_feature_matrix(stats: dict[str, np.ndarray], focus: np.ndarray) -
     return features / np.maximum(norms, 1e-8)
 
 
+WORD_RE = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?")
+MALFORMED_RE = re.compile(r"[A-Za-z]{2,}\\d+|\d+[A-Za-z]{2,}")
+
+
+class WordCharScorer:
+    def __init__(self, reference_text: Path, byte_lm, max_bytes: int, word_weight: float):
+        self.byte_lm = byte_lm
+        self.word_weight = word_weight
+        text = reference_text.read_text(encoding="utf-8", errors="ignore")[:max_bytes]
+        counts_by_word: dict[str, int] = {}
+        for match in WORD_RE.finditer(text):
+            word = match.group(0).lower()
+            if len(word) <= 1:
+                continue
+            counts_by_word[word] = counts_by_word.get(word, 0) + 1
+        total = float(sum(counts_by_word.values()))
+        vocab = max(1, len(counts_by_word))
+        self.word_nll: dict[str, float] = {
+            word: -math.log((count + 0.5) / (total + 0.5 * vocab))
+            for word, count in counts_by_word.items()
+        }
+        self.unknown_base = -math.log(0.5 / (total + 0.5 * vocab))
+        print(f"crib_word_char_scorer: words={vocab} bytes={min(len(text), max_bytes)}", flush=True)
+
+    def score(self, text: str) -> float:
+        data = text.encode("utf-8", errors="replace")
+        score = self.byte_lm.bits_per_byte(data) * max(1, len(data))
+        word_cost = 0.0
+        for match in WORD_RE.finditer(text):
+            word = match.group(0).lower()
+            if len(word) <= 1:
+                continue
+            known = self.word_nll.get(word)
+            if known is None:
+                word_cost += self.unknown_base + 0.4 * min(len(word), 24)
+            else:
+                word_cost += known
+        score += self.word_weight * word_cost
+        score += 8.0 * text.count("\ufffd")
+        score += 3.0 * len(MALFORMED_RE.findall(text))
+        return score
+
+
 def torch_context_maps(ids: np.ndarray, focus: np.ndarray, anchors: np.ndarray, device: str, offset: int = 1):
     vocab_floor = int(max(int(ids.max(initial=0)), int(focus.max(initial=0)), int(anchors.max(initial=0)))) + 1
     focus_lookup = torch.full((vocab_floor,), -1, dtype=torch.int32, device=device)
@@ -1069,7 +1125,148 @@ def refine_with_bigram_objective(
     return mapping
 
 
-def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_adapter) -> np.ndarray:
+def evenly_spaced_positions(positions: np.ndarray, limit: int) -> np.ndarray:
+    if len(positions) <= limit:
+        return positions
+    idx = np.linspace(0, len(positions) - 1, limit, dtype=np.int64)
+    return positions[idx]
+
+
+def decode_window_with_move(
+    cipher_ids: np.ndarray,
+    mapping: np.ndarray,
+    target_adapter,
+    start: int,
+    stop: int,
+    moved_c: int | None = None,
+    moved_p: int | None = None,
+) -> str:
+    mapped = mapping[cipher_ids[start:stop]].astype(np.int64, copy=True)
+    if moved_c is not None and moved_p is not None:
+        local = cipher_ids[start:stop] == moved_c
+        if bool(local.any()):
+            mapped[local] = moved_p
+    return target_adapter.decode(mapped.tolist())
+
+
+def crib_repair_candidates(
+    edges: list[tuple[float, int, int]],
+    mapping: np.ndarray,
+    fixed_anchors: dict[int, int],
+) -> dict[int, list[int]]:
+    candidates: dict[int, list[int]] = {}
+    seen: dict[int, set[int]] = {}
+    for _, c, p in edges:
+        if c in fixed_anchors or int(mapping[c]) == p:
+            continue
+        bucket = candidates.setdefault(c, [])
+        used = seen.setdefault(c, set())
+        if len(bucket) >= CRIB_REPAIR_MAX_CANDIDATES:
+            continue
+        if p in used:
+            continue
+        bucket.append(p)
+        used.add(p)
+    return candidates
+
+
+def precision_crib_repair(
+    cipher_ids: np.ndarray,
+    mapping: np.ndarray,
+    c_focus: np.ndarray,
+    edges: list[tuple[float, int, int]],
+    target_adapter,
+    scorer: WordCharScorer | None,
+    fixed_anchors: dict[int, int],
+) -> np.ndarray:
+    if not CRIB_REPAIR or scorer is None:
+        return mapping
+    candidate_by_c = crib_repair_candidates(edges, mapping, fixed_anchors)
+    target_owner: dict[int, int] = {}
+    for c in c_focus:
+        p = int(mapping[int(c)])
+        if p not in target_owner:
+            target_owner[p] = int(c)
+    proposals: list[tuple[float, float, float, int, int, int]] = []
+    tested = 0
+    for c in c_focus[:CRIB_REPAIR_MAX_TYPES]:
+        c = int(c)
+        if c in fixed_anchors:
+            continue
+        positions = np.flatnonzero(cipher_ids == c)
+        if len(positions) < CRIB_REPAIR_MIN_OCCURRENCES:
+            continue
+        sample_positions = evenly_spaced_positions(positions, CRIB_REPAIR_MAX_OCCURRENCES)
+        for p in candidate_by_c.get(c, []):
+            p = int(p)
+            owner = target_owner.get(p)
+            if owner is not None and owner != c:
+                continue
+            old_piece = decode_token_text(target_adapter, int(mapping[c]))
+            new_piece = decode_token_text(target_adapter, p)
+            if not new_piece or len(new_piece.encode("utf-8", errors="replace")) > 32:
+                continue
+            if surface_class(old_piece).endswith("punct") != surface_class(new_piece).endswith("punct"):
+                continue
+            gains: list[float] = []
+            for pos in sample_positions:
+                start = max(0, int(pos) - CRIB_REPAIR_CONTEXT)
+                stop = min(len(cipher_ids), int(pos) + CRIB_REPAIR_CONTEXT + 1)
+                old_text = decode_window_with_move(cipher_ids, mapping, target_adapter, start, stop)
+                new_text = decode_window_with_move(cipher_ids, mapping, target_adapter, start, stop, c, p)
+                gains.append(scorer.score(old_text) - scorer.score(new_text))
+            if not gains:
+                continue
+            tested += 1
+            arr = np.asarray(gains, dtype=np.float32)
+            median = float(np.median(arr))
+            p10 = float(np.quantile(arr, 0.10))
+            positive = float(np.mean(arr > 0.0))
+            if (
+                median >= CRIB_REPAIR_MIN_MEDIAN_GAIN
+                and p10 >= CRIB_REPAIR_P10_FLOOR
+                and positive >= CRIB_REPAIR_MIN_POSITIVE_FRAC
+            ):
+                proposals.append((median, p10, positive, c, p, len(sample_positions)))
+    proposals.sort(reverse=True)
+    repaired = mapping.copy()
+    accepted = 0
+    used_targets = {int(repaired[int(c)]) for c in c_focus}
+    for median, p10, positive, c, p, seen_count in proposals:
+        current = int(repaired[c])
+        if current == p:
+            continue
+        owner = target_owner.get(p)
+        if owner is not None and owner != c:
+            continue
+        if p in used_targets and p != current:
+            continue
+        repaired[c] = p
+        used_targets.discard(current)
+        used_targets.add(p)
+        accepted += 1
+        print(
+            "crib_repair_accept: "
+            f"c={c} p={p} median={median:.3f} p10={p10:.3f} "
+            f"positive={positive:.3f} n={seen_count} "
+            f"old={display_surface(decode_token_text(target_adapter, current))} "
+            f"new={display_surface(decode_token_text(target_adapter, p))}",
+            flush=True,
+        )
+        if accepted >= CRIB_REPAIR_MAX_ACCEPT:
+            break
+    print(f"crib_repair_tested={tested}", flush=True)
+    print(f"crib_repair_proposals={len(proposals)}", flush=True)
+    print(f"crib_repair_accepted={accepted}", flush=True)
+    return repaired
+
+
+def align_shuffled(
+    cipher_ids: np.ndarray,
+    ref_ids: np.ndarray,
+    target_adapter,
+    crib_scorer: WordCharScorer | None = None,
+) -> np.ndarray:
     target_vocab_size = target_adapter.spec.vocab_size
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device: {device}", flush=True)
@@ -1273,6 +1470,18 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_adapter) 
             apply_id_lock(mapping, target_vocab_size, p_order_all)
             if STRUCTURAL_SEED_LOCK:
                 apply_fixed_anchors(mapping, fixed_anchors)
+            mapping = precision_crib_repair(
+                cipher_ids,
+                mapping,
+                c_focus,
+                edges,
+                target_adapter,
+                crib_scorer,
+                fixed_anchors,
+            )
+            apply_id_lock(mapping, target_vocab_size, p_order_all)
+            if STRUCTURAL_SEED_LOCK:
+                apply_fixed_anchors(mapping, fixed_anchors)
         if use_dynamic_anchors and len(assigned_scores) >= 64:
             assigned_scores.sort(reverse=True)
             next_anchor_rows: list[int] = []
@@ -1322,7 +1531,12 @@ def main() -> None:
         print(f"wrote_structural_anchor_audit: {out_dir / 'structural_anchor_audit.json'}", flush=True)
         return
 
-    mapping = align_shuffled(cipher_stream, task.ref_ids, task.target_adapter)
+    crib_scorer = (
+        WordCharScorer(task.reference_text, task.byte_lm, CRIB_REPAIR_WORD_BYTES, CRIB_REPAIR_WORD_WEIGHT)
+        if CRIB_REPAIR
+        else None
+    )
+    mapping = align_shuffled(cipher_stream, task.ref_ids, task.target_adapter, crib_scorer)
     mapped_sample = mapping[cipher_stream[:SAMPLE_TOKENS]]
     recovered_sample = task.target_adapter.decode(mapped_sample.tolist())
     metrics = evaluate_recovery(task, recovered_sample, SAMPLE_TOKENS)
@@ -1366,6 +1580,15 @@ def main() -> None:
         "structural_features": STRUCTURAL_FEATURES,
         "structural_feature_top_n": STRUCTURAL_FEATURE_TOP_N,
         "structural_feature_weight": STRUCTURAL_FEATURE_WEIGHT,
+        "crib_repair": CRIB_REPAIR,
+        "crib_repair_max_types": CRIB_REPAIR_MAX_TYPES,
+        "crib_repair_max_candidates": CRIB_REPAIR_MAX_CANDIDATES,
+        "crib_repair_min_occurrences": CRIB_REPAIR_MIN_OCCURRENCES,
+        "crib_repair_context": CRIB_REPAIR_CONTEXT,
+        "crib_repair_min_median_gain": CRIB_REPAIR_MIN_MEDIAN_GAIN,
+        "crib_repair_p10_floor": CRIB_REPAIR_P10_FLOOR,
+        "crib_repair_min_positive_frac": CRIB_REPAIR_MIN_POSITIVE_FRAC,
+        "crib_repair_word_weight": CRIB_REPAIR_WORD_WEIGHT,
         "elapsed_seconds": time.time() - t0,
         "metrics": metrics,
         "preview": recovered_sample[:1000],
