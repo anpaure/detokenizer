@@ -44,6 +44,9 @@ ID_PROXIMITY_MODE = os.environ.get("DETOK_ID_PROXIMITY_MODE", "absolute")
 ID_INIT_MODE = os.environ.get("DETOK_ID_INIT_MODE", "freq")
 ID_EXACT_BONUS = float(os.environ.get("DETOK_ID_EXACT_BONUS", "0.0"))
 ID_LOCK_PREFIX = int(os.environ.get("DETOK_ID_LOCK_PREFIX", "0"))
+ID_LOCK_MODE = os.environ.get("DETOK_ID_LOCK_MODE", "absolute")
+DESHUFFLE_BY_FREQUENCY = os.environ.get("DETOK_DESHUFFLE_BY_FREQUENCY", "0") == "1"
+DESHUFFLE_FREQ_ORDER = os.environ.get("DETOK_DESHUFFLE_FREQ_ORDER", "desc")
 STRUCTURAL_ANCHOR_AUDIT = os.environ.get("DETOK_STRUCTURAL_ANCHOR_AUDIT", "0") == "1"
 STRUCTURAL_AUDIT_TOP_N = int(os.environ.get("DETOK_STRUCTURAL_AUDIT_TOP_N", "5000"))
 STRUCTURAL_AUDIT_REPORT_TOP = int(os.environ.get("DETOK_STRUCTURAL_AUDIT_REPORT_TOP", "25"))
@@ -108,11 +111,27 @@ def counts(ids: np.ndarray, size: int) -> np.ndarray:
     return np.bincount(ids.astype(np.int64, copy=False), minlength=size)
 
 
-def apply_id_lock(mapping: np.ndarray, target_vocab_size: int) -> None:
+def frequency_rank_ids(ids: np.ndarray, order: str) -> np.ndarray:
+    """Renumber observed token IDs by their unigram frequency rank."""
+    source_counts = counts(ids, int(ids.max(initial=0)) + 1)
+    observed = np.flatnonzero(source_counts)
+    if order == "asc":
+        ranked = observed[np.argsort(source_counts[observed], kind="stable")]
+    else:
+        ranked = observed[np.argsort(-source_counts[observed], kind="stable")]
+    rank_by_token = np.full(len(source_counts), len(ranked), dtype=np.int64)
+    rank_by_token[ranked] = np.arange(len(ranked), dtype=np.int64)
+    return rank_by_token[ids].astype(np.int64, copy=False)
+
+
+def apply_id_lock(mapping: np.ndarray, target_vocab_size: int, p_order_all: np.ndarray | None = None) -> None:
     if not (UNSHUFFLED_SOURCE_IDS and ID_LOCK_PREFIX > 0):
         return
     limit = min(ID_LOCK_PREFIX, len(mapping), target_vocab_size)
-    mapping[:limit] = np.arange(limit, dtype=np.int64)
+    if ID_LOCK_MODE == "rank" and p_order_all is not None:
+        mapping[:limit] = p_order_all[:limit]
+    else:
+        mapping[:limit] = np.arange(limit, dtype=np.int64)
 
 
 def display_surface(text: str, max_len: int = 48) -> str:
@@ -846,8 +865,16 @@ def topk_edges(
         id_delta = None
         if UNSHUFFLED_SOURCE_IDS and ID_PROXIMITY_WEIGHT:
             c_id_t = torch.as_tensor(c_ids.astype(np.float32), dtype=torch.float32, device=device)
-            id_center = c_id_t * float(id_scale) if ID_PROXIMITY_MODE == "scaled" else c_id_t
-            id_delta = torch.abs(id_center[:, None] - p_id_t[None, :])
+            if ID_PROXIMITY_MODE == "scaled":
+                id_center = c_id_t * float(id_scale)
+                p_id_for_delta = p_id_t
+            elif ID_PROXIMITY_MODE == "rank":
+                id_center = c_id_t
+                p_id_for_delta = p_rank_t.to(torch.float32)
+            else:
+                id_center = c_id_t
+                p_id_for_delta = p_id_t
+            id_delta = torch.abs(id_center[:, None] - p_id_for_delta[None, :])
             sim -= ID_PROXIMITY_WEIGHT * torch.log1p(id_delta) / id_norm
             if ID_EXACT_BONUS:
                 sim += ID_EXACT_BONUS * (id_delta == 0).to(torch.float32)
@@ -857,8 +884,16 @@ def topk_edges(
             if UNSHUFFLED_SOURCE_IDS and ID_CANDIDATE_WINDOW > 0:
                 if id_delta is None:
                     c_id_t = torch.as_tensor(c_ids.astype(np.float32), dtype=torch.float32, device=device)
-                    id_center = c_id_t * float(id_scale) if ID_PROXIMITY_MODE == "scaled" else c_id_t
-                    id_delta = torch.abs(id_center[:, None] - p_id_t[None, :])
+                    if ID_PROXIMITY_MODE == "scaled":
+                        id_center = c_id_t * float(id_scale)
+                        p_id_for_delta = p_id_t
+                    elif ID_PROXIMITY_MODE == "rank":
+                        id_center = c_id_t
+                        p_id_for_delta = p_rank_t.to(torch.float32)
+                    else:
+                        id_center = c_id_t
+                        p_id_for_delta = p_id_t
+                    id_delta = torch.abs(id_center[:, None] - p_id_for_delta[None, :])
                 mask = mask | (id_delta <= float(ID_CANDIDATE_WINDOW))
             sim = sim.masked_fill(~mask, -1.0e9)
         values, indices = torch.topk(sim, k=k, dim=1)
@@ -1046,7 +1081,7 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_adapter) 
         else:
             mapped = source_ids.astype(np.int64)
         mapping[: len(c_counts)] = np.clip(mapped, 0, target_vocab_size - 1)
-    apply_id_lock(mapping, target_vocab_size)
+    apply_id_lock(mapping, target_vocab_size, p_order_all)
     fixed_anchors = structural_seed_anchor_pairs(
         cipher_ids,
         ref_ids,
@@ -1200,7 +1235,7 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_adapter) 
         next_mapping = mapping.copy()
         for c, p in assigned_p_by_c.items():
             next_mapping[c] = p
-        apply_id_lock(next_mapping, target_vocab_size)
+        apply_id_lock(next_mapping, target_vocab_size, p_order_all)
         if STRUCTURAL_SEED_LOCK:
             apply_fixed_anchors(next_mapping, fixed_anchors)
         mapping = next_mapping
@@ -1214,7 +1249,7 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_adapter) 
                 target_vocab_size,
                 p_counts,
             )
-            apply_id_lock(mapping, target_vocab_size)
+            apply_id_lock(mapping, target_vocab_size, p_order_all)
             if STRUCTURAL_SEED_LOCK:
                 apply_fixed_anchors(mapping, fixed_anchors)
         if use_dynamic_anchors and len(assigned_scores) >= 64:
@@ -1248,9 +1283,12 @@ def main() -> None:
     print(f"source_tokenizer: {task.source_adapter.spec.name}")
     print(f"target_tokenizer: {task.target_adapter.spec.name}")
     cipher_stream = task.secret_ids if UNSHUFFLED_SOURCE_IDS else task.cipher_ids
+    if DESHUFFLE_BY_FREQUENCY:
+        cipher_stream = frequency_rank_ids(task.cipher_ids, DESHUFFLE_FREQ_ORDER)
     print(f"cipher_tokens: {len(cipher_stream):,}")
     print(f"reference_tokens: {len(task.ref_ids):,}")
     print(f"unshuffled_source_ids: {UNSHUFFLED_SOURCE_IDS}")
+    print(f"deshuffle_by_frequency: {DESHUFFLE_BY_FREQUENCY}")
 
     if STRUCTURAL_ANCHOR_AUDIT:
         report = structural_anchor_audit(task)
@@ -1296,6 +1334,9 @@ def main() -> None:
         "id_init_mode": ID_INIT_MODE,
         "id_exact_bonus": ID_EXACT_BONUS,
         "id_lock_prefix": ID_LOCK_PREFIX,
+        "id_lock_mode": ID_LOCK_MODE,
+        "deshuffle_by_frequency": DESHUFFLE_BY_FREQUENCY,
+        "deshuffle_freq_order": DESHUFFLE_FREQ_ORDER,
         "structural_seed_anchors": STRUCTURAL_SEED_ANCHORS,
         "structural_seed_lock": STRUCTURAL_SEED_LOCK,
         "structural_seed_common_surfaces": STRUCTURAL_SEED_COMMON_SURFACES,
