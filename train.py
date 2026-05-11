@@ -44,6 +44,14 @@ STRUCTURAL_AUDIT_SPECTRAL_DIMS = int(os.environ.get("DETOK_STRUCTURAL_AUDIT_SPEC
 STRUCTURAL_AUDIT_SPECTRAL_ITERS = int(os.environ.get("DETOK_STRUCTURAL_AUDIT_SPECTRAL_ITERS", "8"))
 STRUCTURAL_AUDIT_TOKEN_LIMIT = int(os.environ.get("DETOK_STRUCTURAL_AUDIT_TOKENS", "1000000"))
 STRUCTURAL_AUDIT_LABEL_TOP = int(os.environ.get("DETOK_STRUCTURAL_AUDIT_LABEL_TOP", "20000"))
+STRUCTURAL_SEED_ANCHORS = os.environ.get("DETOK_STRUCTURAL_SEED_ANCHORS", "0") == "1"
+STRUCTURAL_SEED_LOCK = os.environ.get("DETOK_STRUCTURAL_SEED_LOCK", "1") == "1"
+STRUCTURAL_SEED_COMMON_SURFACES = tuple(
+    s for s in os.environ.get("DETOK_STRUCTURAL_SEED_COMMON_SURFACES", "").split("|") if s
+)
+STRUCTURAL_FEATURES = os.environ.get("DETOK_STRUCTURAL_FEATURES", "0") == "1"
+STRUCTURAL_FEATURE_TOP_N = int(os.environ.get("DETOK_STRUCTURAL_FEATURE_TOP_N", "5000"))
+STRUCTURAL_FEATURE_WEIGHT = float(os.environ.get("DETOK_STRUCTURAL_FEATURE_WEIGHT", "0.25"))
 
 TOP_TOKENS = 50_000
 ANCHORS = 8_192
@@ -561,6 +569,130 @@ def structural_anchor_audit(task) -> dict[str, object]:
     return report
 
 
+def find_target_surface_id(adapter, token_counts: np.ndarray, surfaces: tuple[str, ...]) -> int | None:
+    wanted = set(surfaces)
+    best_id: int | None = None
+    best_count = -1
+    for token_id in np.argsort(-token_counts):
+        text = decode_token_text(adapter, int(token_id))
+        if text not in wanted:
+            continue
+        count = int(token_counts[int(token_id)])
+        if count > best_count:
+            best_id = int(token_id)
+            best_count = count
+    return best_id
+
+
+def first_ranked_unused(scores: np.ndarray, used: set[int]) -> int | None:
+    for token_id in np.argsort(-scores):
+        token_id = int(token_id)
+        if scores[token_id] <= -1.0e8:
+            return None
+        if token_id not in used:
+            return token_id
+    return None
+
+
+def period_like_candidate(stats: dict[str, np.ndarray], used: set[int]) -> int | None:
+    punct_rank = rank_array(stats["punct_score"])
+    right_entropy_rank = rank_array(stats["right_entropy"])
+    for token_id in np.argsort(-stats["pagerank"]):
+        token_id = int(token_id)
+        if stats["pagerank"][token_id] <= 0:
+            return None
+        if token_id in used:
+            continue
+        if punct_rank[token_id] <= 12 and right_entropy_rank[token_id] >= 20:
+            return token_id
+    return None
+
+
+def structural_seed_anchor_pairs(
+    cipher_ids: np.ndarray,
+    ref_ids: np.ndarray,
+    target_adapter,
+    source_vocab_size: int,
+    target_vocab_size: int,
+) -> dict[int, int]:
+    if not STRUCTURAL_SEED_ANCHORS:
+        return {}
+    stats = structural_graph_stats(
+        cipher_ids,
+        max(source_vocab_size, int(cipher_ids.max(initial=0)) + 1),
+        STRUCTURAL_AUDIT_TOP_N,
+        0,
+    )
+    target_counts = counts(ref_ids, target_vocab_size)
+    target_by_surface: dict[str, int] = {}
+    for surface in (".", ",", " the", *STRUCTURAL_SEED_COMMON_SURFACES):
+        token_id = find_target_surface_id(target_adapter, target_counts, (surface,))
+        if token_id is not None:
+            target_by_surface[surface] = token_id
+
+    anchors: dict[int, int] = {}
+    used_c: set[int] = set()
+    used_p: set[int] = set()
+
+    def add(surface: str, cipher_id: int | None) -> None:
+        if cipher_id is None:
+            return
+        target_id = target_by_surface.get(surface)
+        if target_id is None or cipher_id in used_c or target_id in used_p:
+            return
+        anchors[int(cipher_id)] = int(target_id)
+        used_c.add(int(cipher_id))
+        used_p.add(int(target_id))
+
+    add(" the", first_ranked_unused(stats["hub_score"], used_c))
+    add(",", first_ranked_unused(stats["punct_score"], used_c))
+    add(".", period_like_candidate(stats, used_c))
+    for surface in STRUCTURAL_SEED_COMMON_SURFACES:
+        add(surface, first_ranked_unused(stats["hub_score"], used_c))
+
+    if anchors:
+        print("structural_seed_anchors:", flush=True)
+        for c, p in anchors.items():
+            print(
+                f"  c={c} -> p={p} target={display_surface(decode_token_text(target_adapter, p))}",
+                flush=True,
+            )
+    return anchors
+
+
+def apply_fixed_anchors(mapping: np.ndarray, anchors: dict[int, int]) -> None:
+    for c, p in anchors.items():
+        if c < len(mapping):
+            mapping[int(c)] = int(p)
+
+
+def standardize_feature_column(values: np.ndarray) -> np.ndarray:
+    values = values.astype(np.float32, copy=False)
+    mask = np.isfinite(values) & (values != 0)
+    out = np.zeros_like(values, dtype=np.float32)
+    if not bool(mask.any()):
+        return out
+    mean = float(values[mask].mean())
+    std = float(values[mask].std())
+    if std < 1e-8:
+        return out
+    out[mask] = (values[mask] - mean) / std
+    return out
+
+
+def structural_feature_matrix(stats: dict[str, np.ndarray], focus: np.ndarray) -> np.ndarray:
+    columns = [
+        stats["right_entropy"][focus],
+        stats["left_entropy"][focus],
+        np.log1p(stats["right_distinct"][focus]),
+        np.log1p(stats["left_distinct"][focus]),
+        np.log(np.maximum(stats["pagerank"][focus], 1e-12)),
+    ]
+    features = np.column_stack([standardize_feature_column(col) for col in columns]).astype(np.float32)
+    norms = np.linalg.norm(features, axis=1, keepdims=True)
+    return features / np.maximum(norms, 1e-8)
+
+
 def torch_context_maps(ids: np.ndarray, focus: np.ndarray, anchors: np.ndarray, device: str, offset: int = 1):
     vocab_floor = int(max(int(ids.max(initial=0)), int(focus.max(initial=0)), int(anchors.max(initial=0)))) + 1
     focus_lookup = torch.full((vocab_floor,), -1, dtype=torch.int32, device=device)
@@ -854,7 +986,8 @@ def refine_with_bigram_objective(
     return mapping
 
 
-def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_size: int) -> np.ndarray:
+def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_adapter) -> np.ndarray:
+    target_vocab_size = target_adapter.spec.vocab_size
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device: {device}", flush=True)
     candidate_window = effective_candidate_window(len(cipher_ids))
@@ -874,6 +1007,35 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
     mapping = np.zeros(max(len(c_counts), target_vocab_size), dtype=np.int64)
     init = c_order_all[: len(p_order_all)]
     mapping[init] = p_order_all[: len(init)]
+    fixed_anchors = structural_seed_anchor_pairs(
+        cipher_ids,
+        ref_ids,
+        target_adapter,
+        len(c_counts),
+        target_vocab_size,
+    )
+    if STRUCTURAL_SEED_LOCK:
+        apply_fixed_anchors(mapping, fixed_anchors)
+    c_struct = p_struct = None
+    if STRUCTURAL_FEATURES:
+        c_stats = structural_graph_stats(
+            cipher_ids,
+            len(c_counts),
+            STRUCTURAL_FEATURE_TOP_N,
+            0,
+        )
+        p_stats = structural_graph_stats(
+            ref_ids,
+            target_vocab_size,
+            STRUCTURAL_FEATURE_TOP_N,
+            0,
+        )
+        c_struct = structural_feature_matrix(c_stats, c_focus)
+        p_struct = structural_feature_matrix(p_stats, p_focus)
+        print(
+            f"structural_features: top_n={STRUCTURAL_FEATURE_TOP_N} weight={STRUCTURAL_FEATURE_WEIGHT}",
+            flush=True,
+        )
 
     c_log = np.log(np.maximum(c_counts, 1) / max(1, int(c_counts.sum())))
     p_log = np.log(np.maximum(p_counts, 1) / max(1, int(p_counts.sum())))
@@ -919,6 +1081,13 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
                 p_parts.extend([p_left2, p_right2])
             c_vec = normalize_features(torch.cat(c_parts, dim=1), c_counts[c_focus], device)
             p_vec = normalize_features(torch.cat(p_parts, dim=1), p_counts[p_focus], device)
+            if c_struct is not None and p_struct is not None:
+                c_extra = torch.as_tensor(c_struct, dtype=torch.float32, device=device) * STRUCTURAL_FEATURE_WEIGHT
+                p_extra = torch.as_tensor(p_struct, dtype=torch.float32, device=device) * STRUCTURAL_FEATURE_WEIGHT
+                c_vec = torch.cat([c_vec, c_extra], dim=1)
+                p_vec = torch.cat([p_vec, p_extra], dim=1)
+                c_vec = c_vec / torch.linalg.vector_norm(c_vec, dim=1, keepdim=True).clamp_min(1e-12)
+                p_vec = p_vec / torch.linalg.vector_norm(p_vec, dim=1, keepdim=True).clamp_min(1e-12)
             del c_parts, p_parts, c_left, c_right, p_left, p_right
             if use_skip_context:
                 del c_left2, c_right2, p_left2, p_right2
@@ -939,11 +1108,11 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
                 torch.cuda.empty_cache()
 
         edges.sort(reverse=True)
-        used_c: set[int] = set()
-        used_p: set[int] = set()
-        assigned_p_by_c: dict[int, int] = {}
-        assigned_c_by_p: dict[int, int] = {}
-        assigned_score_by_c: dict[int, float] = {}
+        used_c: set[int] = set(fixed_anchors) if STRUCTURAL_SEED_LOCK else set()
+        used_p: set[int] = set(fixed_anchors.values()) if STRUCTURAL_SEED_LOCK else set()
+        assigned_p_by_c: dict[int, int] = dict(fixed_anchors) if STRUCTURAL_SEED_LOCK else {}
+        assigned_c_by_p: dict[int, int] = {p: c for c, p in fixed_anchors.items()} if STRUCTURAL_SEED_LOCK else {}
+        assigned_score_by_c: dict[int, float] = {c: 1.0e9 for c in fixed_anchors} if STRUCTURAL_SEED_LOCK else {}
         score_by_c: dict[int, dict[int, float]] | None = {} if use_dynamic_anchors and ENABLE_DYNAMIC_ASSIGNMENT_SWAPS else None
         if score_by_c is not None:
             for score, c, p in edges:
@@ -964,6 +1133,8 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
                 current_p = assigned_p_by_c.get(c)
                 other_c = assigned_c_by_p.get(p)
                 if current_p is None or other_c is None or current_p == p or other_c == c:
+                    continue
+                if STRUCTURAL_SEED_LOCK and (c in fixed_anchors or other_c in fixed_anchors):
                     continue
                 other_scores = score_by_c.get(other_c)
                 if other_scores is None:
@@ -988,6 +1159,8 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
         next_mapping = mapping.copy()
         for c, p in assigned_p_by_c.items():
             next_mapping[c] = p
+        if STRUCTURAL_SEED_LOCK:
+            apply_fixed_anchors(next_mapping, fixed_anchors)
         mapping = next_mapping
         if round_idx == rounds - 1 and (use_dynamic_anchors or BIGRAM_REFINE_ALL_SCALES):
             mapping = refine_with_bigram_objective(
@@ -999,6 +1172,8 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
                 target_vocab_size,
                 p_counts,
             )
+            if STRUCTURAL_SEED_LOCK:
+                apply_fixed_anchors(mapping, fixed_anchors)
         if use_dynamic_anchors and len(assigned_scores) >= 64:
             assigned_scores.sort(reverse=True)
             next_anchor_rows: list[int] = []
@@ -1043,7 +1218,7 @@ def main() -> None:
         print(f"wrote_structural_anchor_audit: {out_dir / 'structural_anchor_audit.json'}", flush=True)
         return
 
-    mapping = align_shuffled(task.cipher_ids, task.ref_ids, task.target_adapter.spec.vocab_size)
+    mapping = align_shuffled(task.cipher_ids, task.ref_ids, task.target_adapter)
     mapped_sample = mapping[task.cipher_ids[:SAMPLE_TOKENS]]
     recovered_sample = task.target_adapter.decode(mapped_sample.tolist())
     metrics = evaluate_recovery(task, recovered_sample, SAMPLE_TOKENS)
@@ -1069,6 +1244,12 @@ def main() -> None:
         "bigram_refine_all_scales": BIGRAM_REFINE_ALL_SCALES,
         "skip_context_weight": SKIP_CONTEXT_WEIGHT,
         "learn_skip_weight": LEARN_SKIP_WEIGHT,
+        "structural_seed_anchors": STRUCTURAL_SEED_ANCHORS,
+        "structural_seed_lock": STRUCTURAL_SEED_LOCK,
+        "structural_seed_common_surfaces": STRUCTURAL_SEED_COMMON_SURFACES,
+        "structural_features": STRUCTURAL_FEATURES,
+        "structural_feature_top_n": STRUCTURAL_FEATURE_TOP_N,
+        "structural_feature_weight": STRUCTURAL_FEATURE_WEIGHT,
         "elapsed_seconds": time.time() - t0,
         "metrics": metrics,
         "preview": recovered_sample[:1000],
