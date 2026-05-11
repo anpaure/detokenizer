@@ -210,3 +210,17 @@ f6344fb	gemma-o200k-100m-unshuffled-lock192	0.118980	0.118980	2.832837	2.4	diagn
 36ee2dc	mainu-o200k-qwen36-10m-l192-seed-w010	0.117360	0.117360	2.676299	2.3	diagnostic	id proximity weight 0.10 improves qwen 10m but 0.02 is better
 36ee2dc	mainu-o200k-qwen36-10m-l192-seed-w002	0.116900	0.116900	2.683781	2.3	keep	best o200k to qwen36 10m result from light id proximity on lock192
 36ee2dc	mainu-o200k-qwen36-10m-l192-seed-w003	0.119960	0.119960	2.683165	2.3	discard	id proximity weight 0.03 regresses versus 0.02 on qwen 10m
+d4a585e	mainu-gemma-o200k-1m-l128-seed-feat005-anneal0802	0.290240	0.290240	2.864484	3.6	discard	annealing ID proximity from 0.08 to 0.02 admits late noise and loses versus constant 0.05 on Gemma 1m
+d4a585e	mainu-gemma-o200k-1m-l128-seed-feat005-anneal0500	0.291080	0.291080	2.861711	3.7	discard	removing ID proximity by the last round hurts Gemma 1m despite the same structural feature setup
+d4a585e	mainu-gemma-o200k-10m-l192-seed-anneal1002	0.167320	0.167320	2.896471	2.4	discard	strong early ID proximity still over-constrains Gemma 10m even when decayed to 0.02
+d4a585e	mainu-gemma-o200k-10m-l192-seed-anneal0500	0.161180	0.161180	2.902203	2.3	keep	best Gemma to o200k 10m result: use low-ID structure early, then decay smooth ID proximity to zero
+d4a585e	mainu-o200k-qwen36-1m-l256-seed-anneal1002	0.262060	0.262060	2.750595	3.5	diagnostic	annealing from 0.10 to 0.02 is close but does not beat constant 0.02 on qwen 1m
+d4a585e	mainu-o200k-qwen36-1m-l256-seed-anneal0501	0.266520	0.266520	2.751526	3.6	discard	decaying qwen 1m below the 0.02 prior loses precision
+d4a585e	mainu-o200k-qwen36-10m-l192-seed-anneal1002	0.122780	0.122780	2.752701	2.3	discard	strong early ID proximity is actively harmful on qwen 10m even with a 0.02 final weight
+d4a585e	mainu-o200k-qwen36-10m-l192-seed-anneal0501	0.121780	0.121780	2.750500	2.4	discard	decaying qwen 10m below the 0.02 constant prior loses the best light-ID ordering signal
+d4a585e	mainu-gemma-o200k-10m-l192-seed-anneal0500-pow05	0.161040	0.161040	2.894284	2.3	diagnostic	faster ID-prior decay slightly improves Gemma 10m versus linear decay but is weaker than slow decay
+d4a585e	mainu-gemma-o200k-10m-l192-seed-anneal0500-pow20	0.158320	0.158320	2.891293	2.3	keep	best Gemma to o200k 10m result: keep ID proximity through mid-rounds, then decay quadratically to zero
+d4a585e	mainu-gemma-o200k-10m-l192-seed-anneal0501	0.161040	0.161040	2.893761	2.3	diagnostic	leaving a small final ID prior ties fast decay but loses to fully removing the late prior
+d4a585e	mainu-gemma-o200k-10m-l192-seed-anneal0400	0.161560	0.161560	2.893205	2.3	discard	lower initial ID proximity underfits early Gemma 10m alignment versus starting at 0.05
+d4a585e	mainu-gemma-o200k-10m-l192-seed-anneal0500-pow15	0.159000	0.159000	2.893595	2.3	diagnostic	slower-than-linear ID-prior decay is good, but slightly worse than quadratic timing
+d4a585e	mainu-gemma-o200k-10m-l192-seed-anneal0500-pow30	0.160520	0.160520	2.911825	2.3	discard	holding the ID prior too long regresses versus the quadratic decay sweet spot
