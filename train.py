@@ -39,6 +39,11 @@ SAMPLE_TOKENS = int(os.environ.get("DETOK_SAMPLE_TOKENS", DEFAULT_SAMPLE_TOKENS)
 SEED = int(os.environ.get("DETOK_SEED", DEFAULT_SEED))
 UNSHUFFLED_SOURCE_IDS = os.environ.get("DETOK_UNSHUFFLED_SOURCE", "1") == "1"
 ID_PROXIMITY_WEIGHT = float(os.environ.get("DETOK_ID_PROXIMITY_WEIGHT", "0.05"))
+_ID_PROXIMITY_FINAL_WEIGHT = os.environ.get("DETOK_ID_PROXIMITY_FINAL_WEIGHT")
+ID_PROXIMITY_FINAL_WEIGHT = (
+    None if _ID_PROXIMITY_FINAL_WEIGHT is None else float(_ID_PROXIMITY_FINAL_WEIGHT)
+)
+ID_PROXIMITY_DECAY_POWER = float(os.environ.get("DETOK_ID_PROXIMITY_DECAY_POWER", "1.0"))
 ID_CANDIDATE_WINDOW = int(os.environ.get("DETOK_ID_CANDIDATE_WINDOW", "0"))
 ID_PROXIMITY_MODE = os.environ.get("DETOK_ID_PROXIMITY_MODE", "absolute")
 ID_INIT_MODE = os.environ.get("DETOK_ID_INIT_MODE", "freq")
@@ -105,6 +110,17 @@ def effective_candidate_window(num_cipher_tokens: int) -> int:
 
 def effective_rounds(num_cipher_tokens: int) -> int:
     return 8 if num_cipher_tokens >= 1_000_000 else ROUNDS
+
+
+def effective_id_proximity_weight(round_idx: int, rounds: int) -> float:
+    if ID_PROXIMITY_FINAL_WEIGHT is None:
+        return ID_PROXIMITY_WEIGHT
+    if rounds <= 1:
+        progress = 1.0
+    else:
+        progress = round_idx / float(rounds - 1)
+    progress = max(0.0, min(1.0, progress)) ** max(ID_PROXIMITY_DECAY_POWER, 1.0e-6)
+    return ID_PROXIMITY_WEIGHT * (1.0 - progress) + ID_PROXIMITY_FINAL_WEIGHT * progress
 
 
 def counts(ids: np.ndarray, size: int) -> np.ndarray:
@@ -848,6 +864,7 @@ def topk_edges(
     p_rank: np.ndarray,
     candidate_window: int,
     id_scale: float,
+    id_proximity_weight: float,
     device: str,
 ) -> list[tuple[float, int, int]]:
     p_log_t = torch.as_tensor(p_log[p_focus].astype(np.float32), dtype=torch.float32, device=device)
@@ -863,7 +880,7 @@ def topk_edges(
         c_log_t = torch.as_tensor(c_log[c_ids].astype(np.float32), dtype=torch.float32, device=device)
         sim -= FREQ_WEIGHT * torch.abs(c_log_t[:, None] - p_log_t[None, :])
         id_delta = None
-        if UNSHUFFLED_SOURCE_IDS and ID_PROXIMITY_WEIGHT:
+        if UNSHUFFLED_SOURCE_IDS and id_proximity_weight:
             c_id_t = torch.as_tensor(c_ids.astype(np.float32), dtype=torch.float32, device=device)
             if ID_PROXIMITY_MODE == "scaled":
                 id_center = c_id_t * float(id_scale)
@@ -875,7 +892,7 @@ def topk_edges(
                 id_center = c_id_t
                 p_id_for_delta = p_id_t
             id_delta = torch.abs(id_center[:, None] - p_id_for_delta[None, :])
-            sim -= ID_PROXIMITY_WEIGHT * torch.log1p(id_delta) / id_norm
+            sim -= id_proximity_weight * torch.log1p(id_delta) / id_norm
             if ID_EXACT_BONUS:
                 sim += ID_EXACT_BONUS * (id_delta == 0).to(torch.float32)
         if candidate_window > 0:
@@ -1120,9 +1137,12 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_adapter) 
     anchor_rows = np.arange(min(ANCHORS, len(c_focus)), dtype=np.int64)
 
     for round_idx in range(rounds):
+        id_proximity_weight = effective_id_proximity_weight(round_idx, rounds)
         c_anchors = c_focus[anchor_rows]
         p_anchors = mapping[c_anchors]
         print(f"round {round_idx + 1}/{rounds}: focus={len(c_focus)} anchors={len(c_anchors)}", flush=True)
+        if ID_PROXIMITY_FINAL_WEIGHT is not None:
+            print(f"id_proximity_weight: {id_proximity_weight:.4f}", flush=True)
         with torch.no_grad():
             c_left, c_right = torch_context_maps(cipher_ids, c_focus, c_anchors, device)
             p_left, p_right = torch_context_maps(ref_ids, p_focus, p_anchors, device)
@@ -1177,6 +1197,7 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_adapter) 
                 p_rank,
                 candidate_window,
                 id_scale,
+                id_proximity_weight,
                 device,
             )
             del c_vec, p_vec
@@ -1329,6 +1350,8 @@ def main() -> None:
         "learn_skip_weight": LEARN_SKIP_WEIGHT,
         "unshuffled_source_ids": UNSHUFFLED_SOURCE_IDS,
         "id_proximity_weight": ID_PROXIMITY_WEIGHT,
+        "id_proximity_final_weight": ID_PROXIMITY_FINAL_WEIGHT,
+        "id_proximity_decay_power": ID_PROXIMITY_DECAY_POWER,
         "id_candidate_window": ID_CANDIDATE_WINDOW,
         "id_proximity_mode": ID_PROXIMITY_MODE,
         "id_init_mode": ID_INIT_MODE,
