@@ -179,3 +179,34 @@ f6344fb	gemma-o200k-100m-unshuffled-lock192	0.118980	0.118980	2.832837	2.4	diagn
 56c30af	o200k-qwen36-1m-unshuffled-lock192-seed	0.270540	0.270540	2.688591	3.5	keep	true unshuffled low-ID lock plus structural anchors beats soft frequency-rank prior at 1m
 56c30af	o200k-qwen36-10m-deshuffle-rank-soft-w010	0.128280	0.128280	2.680815	2.3	diagnostic	soft frequency-rank prior scales strongly on o200k to qwen36 at 10m
 56c30af	o200k-qwen36-10m-unshuffled-lock192-seed	0.117900	0.117900	2.678676	2.3	keep	true unshuffled low-ID lock plus structural anchors remains best at 10m, but soft rank closes much of the gap
+36ee2dc	mainu-gemma-o200k-1m-l192-seed-feat005	0.291580	0.291580	2.801695	3.6	diagnostic	structural feature regularization improves the lock192 1m branch but lock128 features are better
+36ee2dc	mainu-o200k-qwen36-1m-l192-seed-feat005	0.270460	0.270460	2.697228	3.4	diagnostic	structural features barely improve lock192 on qwen 1m; wider locks matter more
+36ee2dc	mainu-gemma-o200k-10m-l192-seed-feat005	0.167560	0.167560	2.818394	2.3	discard	structural feature regularization hurts Gemma to o200k at 10m
+36ee2dc	mainu-o200k-qwen36-10m-l192-seed-feat005	0.120680	0.120680	2.682793	2.3	discard	structural feature regularization hurts o200k to qwen36 at 10m
+36ee2dc	mainu-gemma-o200k-1m-l128-seed	0.292580	0.292580	2.792261	3.6	diagnostic	lock128 without structural features improves over lock192 but is not best
+36ee2dc	mainu-o200k-qwen36-1m-l128-seed	0.274340	0.274340	2.692381	3.5	discard	lock128 is too narrow for o200k to qwen36 at 1m
+36ee2dc	mainu-gemma-o200k-10m-l128-seed	0.166640	0.166640	2.827999	2.3	discard	lock128 regresses Gemma to o200k at 10m
+36ee2dc	mainu-o200k-qwen36-10m-l128-seed	0.118920	0.118920	2.679712	2.3	diagnostic	lock128 improves over no run-time retune but remains behind tuned weight
+36ee2dc	mainu-gemma-o200k-1m-l256-seed	0.294740	0.294740	2.795968	3.6	discard	lock256 is too wide for Gemma to o200k at 1m
+36ee2dc	mainu-o200k-qwen36-1m-l256-seed	0.264340	0.264340	2.686236	3.5	diagnostic	lock256 is the right qwen 1m width before weight tuning
+36ee2dc	mainu-gemma-o200k-10m-l256-seed	0.164120	0.164120	2.828891	2.3	diagnostic	lock256 ties the best retuned 10m widths but remains worse than the prior lock192 baseline
+36ee2dc	mainu-o200k-qwen36-10m-l256-seed	0.118800	0.118800	2.670677	2.3	diagnostic	lock256 helps but is worse than tuned lock192 weight
+36ee2dc	mainu-gemma-o200k-1m-l192-seed-feat005-w010	0.300720	0.300720	2.797889	3.6	discard	id proximity weight 0.10 over-regularizes Gemma to o200k at 1m
+36ee2dc	mainu-gemma-o200k-1m-l192-seed-feat005-w002	0.293740	0.293740	2.792295	3.6	discard	id proximity weight 0.02 is too weak for the Gemma 1m feature branch
+36ee2dc	mainu-gemma-o200k-10m-l192-seed-w010	0.164240	0.164240	2.822192	2.3	diagnostic	id proximity weight 0.10 is close but does not beat the Gemma 10m baseline
+36ee2dc	mainu-gemma-o200k-10m-l192-seed-w002	0.166980	0.166980	2.826727	2.3	discard	id proximity weight 0.02 regresses Gemma to o200k at 10m
+36ee2dc	mainu-o200k-qwen36-1m-l256-seed-w000	0.269380	0.269380	2.691501	3.5	discard	zero id proximity loses the qwen 1m lock256 prior
+36ee2dc	mainu-o200k-qwen36-1m-l256-seed-w001	0.268060	0.268060	2.682147	3.4	discard	id proximity weight 0.01 helps but is not enough for qwen 1m
+36ee2dc	mainu-o200k-qwen36-1m-l256-seed-w010	0.263480	0.263480	2.680085	3.4	diagnostic	id proximity weight 0.10 improves qwen 1m but 0.02 is better
+36ee2dc	mainu-o200k-qwen36-1m-l256-seed-w002	0.261800	0.261800	2.684546	3.5	keep	best o200k to qwen36 1m result from tuned lock256 with light id proximity
+36ee2dc	mainu-o200k-qwen36-1m-l256-seed-w003	0.264260	0.264260	2.686043	3.5	discard	id proximity weight 0.03 regresses versus 0.02 on qwen 1m
+36ee2dc	mainu-gemma-o200k-1m-l128-seed-feat005	0.288880	0.288880	2.796215	3.6	keep	best Gemma to o200k 1m result: narrower low-ID lock plus structural feature regularization
+36ee2dc	mainu-gemma-o200k-1m-l160-seed-feat005	0.293600	0.293600	2.792493	3.6	discard	lock160 with structural features is worse than lock128 at Gemma 1m
+36ee2dc	mainu-gemma-o200k-1m-l224-seed-feat005	0.290300	0.290300	2.801927	3.6	diagnostic	lock224 with structural features is close but worse than lock128 at Gemma 1m
+36ee2dc	mainu-gemma-o200k-10m-l160-seed	0.164120	0.164120	2.827457	2.3	diagnostic	lock160 ties lock256 but does not beat the prior lock192 baseline at Gemma 10m
+36ee2dc	mainu-gemma-o200k-10m-l224-seed	0.166260	0.166260	2.824156	2.3	discard	lock224 regresses Gemma to o200k at 10m
+36ee2dc	mainu-o200k-qwen36-10m-l192-seed-w000	0.120500	0.120500	2.683121	2.3	discard	zero id proximity is too weak for qwen 10m
+36ee2dc	mainu-o200k-qwen36-10m-l192-seed-w001	0.120440	0.120440	2.681173	2.3	discard	id proximity weight 0.01 is still too weak for qwen 10m
+36ee2dc	mainu-o200k-qwen36-10m-l192-seed-w010	0.117360	0.117360	2.676299	2.3	diagnostic	id proximity weight 0.10 improves qwen 10m but 0.02 is better
+36ee2dc	mainu-o200k-qwen36-10m-l192-seed-w002	0.116900	0.116900	2.683781	2.3	keep	best o200k to qwen36 10m result from light id proximity on lock192
+36ee2dc	mainu-o200k-qwen36-10m-l192-seed-w003	0.119960	0.119960	2.683165	2.3	discard	id proximity weight 0.03 regresses versus 0.02 on qwen 10m
