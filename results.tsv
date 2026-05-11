@@ -137,3 +137,20 @@ ade3fe2	core-100k-unshuffled-prefix-lock192	0.465127	0.477180	2.716352	6.3	disca
 60d72f3	qwen36-o200k-100k-structural-features-w005	0.473100	0.473100	2.717546	0.0	discard	low-weight structural feature regularization still regresses hard-screen CER
 60d72f3	mistral-o200k-100k-structural-period-heuristic	0.000000	0.000000	0.000000	0.0	discard	period seed heuristic is unsafe at 100k; it selected a common leading-word node on Mistral before evaluation
 739411e	gemma-o200k-100m-slim-baseline	0.185720	0.185720	2.815607	0.0	baseline	restored slim decoder at 100M target-token request; Gemma fixture produced 98.884M source tokens from fixed FineWeb target text
+739411e	gemma-o200k-1m-slim-baseline	0.313900	0.313900	2.734762	3.6	baseline	exact slim restored decoder on focused Gemma to o200k 1M target-token matrix
+c3f15db	gemma-o200k-1m-unshuffled-idprox	0.310500	0.310500	2.816379	3.6	diagnostic	unshuffled source IDs with soft ID proximity improves CER over slim but worsens BPB
+c3f15db	gemma-o200k-1m-unshuffled-lock192	0.293340	0.293340	2.797435	3.6	keep	low-ID prefix lock is strongly useful at Gemma to o200k 1M despite failing Gemma at 100k
+50ef382	gemma-o200k-1m-structural-seed-lock	0.306060	0.306060	2.719286	3.6	diagnostic	structural PageRank/entropy anchors for leading-the comma and period improve slim on the focused pair
+50ef382	gemma-o200k-1m-structural-features-w005	0.309640	0.309640	2.741326	3.6	diagnostic	low-weight structural graph features improve the focused pair but are weaker than hard anchors
+eafbc29	gemma-o200k-1m-algebraic-pseudoword	0.309140	0.309140	2.743927	3.7	discard	algebraic equation application would regress badly; oracle gate leaves branch drift only
+1b3afb0	gemma-o200k-1m-hybrid-segmental	0.311320	0.311320	2.744288	4.6	discard	segmental islands accepted zero repairs at 1M; small gain is branch drift rather than transducer effect
+35bc22d	gemma-o200k-1m-open-block	0.318000	0.318000	2.726797	3.9	discard	open-domain block assignment improves fluency objective but worsens exact CER
+acd2fb3	gemma-o200k-1m-bayes-sampler	0.348700	0.348700	2.673178	3.8	discard	Bayesian type sampler repeats fluency-overfit failure on the focused 1M pair
+37c09dc	gemma-o200k-1m-segmental-channel	0.000000	0.000000	0.000000	0.0	discard	graphless torch channel branch crashed on empty pair candidates at Gemma to o200k 1M
+da5b309	gemma-o200k-1m-retok-cem	0.310800	0.310800	2.722635	6.1	diagnostic	retokenized CEM gives only tiny gain and selected moves remain polluted
+13fadff	gemma-o200k-1m-retok-elite	0.325380	0.325380	2.691269	7.1	discard	retokenized elite filtering lowers objective but over-selects fluent hitchhikers and regresses CER
+2dfbb5e	gemma-o200k-1m-combo-lock192-seed	0.292160	0.292160	2.797544	3.6	keep	combining unshuffled prefix lock with structural anchors beats either signal alone
+2dfbb5e	gemma-o200k-1m-combo-lock192-seed-features005	0.286020	0.286020	2.801831	3.6	keep	best focused run: unshuffled ID proximity, lock192, structural seeds, and low-weight structural features
+2dfbb5e	gemma-o200k-1m-combo-lock128-seed-features005	0.291520	0.291520	2.799524	3.6	diagnostic	narrower low-ID prefix lock is useful but worse than lock192 in the combined setting
+2dfbb5e	gemma-o200k-1m-combo-lock256-seed-features005	0.293920	0.293920	2.794869	3.6	discard	wider low-ID prefix lock over-constrains versus lock192 in the combined setting
+2dfbb5e	gemma-o200k-1m-combo-lock192-seed-features005-noidprox	0.294320	0.294320	2.801407	3.6	discard	removing smooth ID proximity loses much of the combined-branch gain
