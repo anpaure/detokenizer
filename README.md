@@ -17,6 +17,8 @@ agent optimizes recovery of shuffled token IDs.
   refine, and pivot runs.
 - `plots/improvement_over_time.svg` - summary plot generated from the accepted
   experiment ledger.
+- `scripts/update_plot.js` - regenerates the plot and plot Markdown from
+  `results.tsv`.
 
 ## Install
 
