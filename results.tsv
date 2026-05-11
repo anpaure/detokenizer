@@ -113,3 +113,10 @@ cff784e	qwen36-o200k-100k-screen	0.489720	0.489720	2.762881	6.3	discard	first-or
 726949b	structural-anchor-mistral-o200k-1m	0.000000	0.000000	0.000000	0.0	diagnostic	Mistral structural audit recovers high-mass anchors: leading-the PageRank/hub-rank1, comma punct-rank1, period rank3, newline rank10
 726949b	structural-anchor-gemma-o200k-1m	0.000000	0.000000	0.000000	0.0	diagnostic	Gemma structural audit recovers high-mass anchors: period rank1, comma punct-rank1, leading-the hub-rank1, newline rank4
 726949b	structural-anchor-audit	0.000000	0.000000	0.000000	0.0	diagnostic	Structural features are reliable enough for a seeded-anchor growth branch; bare-space is frequent but not hub-like, so seed on punctuation/newline/common leading-space tokens
+60d72f3	qwen36-o200k-100k-structural-seed-baseline	0.470860	0.470860	2.715119	0.0	baseline	slim branch hard-screen baseline before structural seed attempts
+60d72f3	qwen36-o200k-100k-structural-seed3-locked	0.465040	0.465040	2.733186	0.0	diagnostic	locking structurally selected the comma and period improves Qwen versus slim baseline but is not tokenizer-general
+60d72f3	qwen36-o200k-100k-structural-seed2-locked	0.473180	0.473180	2.740236	0.0	discard	locking only leading-the and comma regresses Qwen versus slim baseline
+60d72f3	qwen36-o200k-100k-structural-seed2-nolock	0.470860	0.470860	2.715119	0.0	discard	using structural pairs only as initial anchors is a no-op because frequency already seeds them
+60d72f3	qwen36-o200k-100k-structural-features-w025	0.488780	0.488780	2.746108	0.0	discard	appending PageRank entropy and degree features at weight 0.25 overpowers context matching
+60d72f3	qwen36-o200k-100k-structural-features-w005	0.473100	0.473100	2.717546	0.0	discard	low-weight structural feature regularization still regresses hard-screen CER
+60d72f3	mistral-o200k-100k-structural-period-heuristic	0.000000	0.000000	0.000000	0.0	discard	period seed heuristic is unsafe at 100k; it selected a common leading-word node on Mistral before evaluation
