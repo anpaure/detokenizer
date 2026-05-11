@@ -44,6 +44,21 @@ ID_PROXIMITY_MODE = os.environ.get("DETOK_ID_PROXIMITY_MODE", "absolute")
 ID_INIT_MODE = os.environ.get("DETOK_ID_INIT_MODE", "freq")
 ID_EXACT_BONUS = float(os.environ.get("DETOK_ID_EXACT_BONUS", "0.0"))
 ID_LOCK_PREFIX = int(os.environ.get("DETOK_ID_LOCK_PREFIX", "0"))
+STRUCTURAL_ANCHOR_AUDIT = os.environ.get("DETOK_STRUCTURAL_ANCHOR_AUDIT", "0") == "1"
+STRUCTURAL_AUDIT_TOP_N = int(os.environ.get("DETOK_STRUCTURAL_AUDIT_TOP_N", "5000"))
+STRUCTURAL_AUDIT_REPORT_TOP = int(os.environ.get("DETOK_STRUCTURAL_AUDIT_REPORT_TOP", "25"))
+STRUCTURAL_AUDIT_SPECTRAL_DIMS = int(os.environ.get("DETOK_STRUCTURAL_AUDIT_SPECTRAL_DIMS", "16"))
+STRUCTURAL_AUDIT_SPECTRAL_ITERS = int(os.environ.get("DETOK_STRUCTURAL_AUDIT_SPECTRAL_ITERS", "8"))
+STRUCTURAL_AUDIT_TOKEN_LIMIT = int(os.environ.get("DETOK_STRUCTURAL_AUDIT_TOKENS", "1000000"))
+STRUCTURAL_AUDIT_LABEL_TOP = int(os.environ.get("DETOK_STRUCTURAL_AUDIT_LABEL_TOP", "20000"))
+STRUCTURAL_SEED_ANCHORS = os.environ.get("DETOK_STRUCTURAL_SEED_ANCHORS", "0") == "1"
+STRUCTURAL_SEED_LOCK = os.environ.get("DETOK_STRUCTURAL_SEED_LOCK", "1") == "1"
+STRUCTURAL_SEED_COMMON_SURFACES = tuple(
+    s for s in os.environ.get("DETOK_STRUCTURAL_SEED_COMMON_SURFACES", "").split("|") if s
+)
+STRUCTURAL_FEATURES = os.environ.get("DETOK_STRUCTURAL_FEATURES", "0") == "1"
+STRUCTURAL_FEATURE_TOP_N = int(os.environ.get("DETOK_STRUCTURAL_FEATURE_TOP_N", "5000"))
+STRUCTURAL_FEATURE_WEIGHT = float(os.environ.get("DETOK_STRUCTURAL_FEATURE_WEIGHT", "0.25"))
 
 TOP_TOKENS = 50_000
 ANCHORS = 8_192
@@ -98,6 +113,598 @@ def apply_id_lock(mapping: np.ndarray, target_vocab_size: int) -> None:
         return
     limit = min(ID_LOCK_PREFIX, len(mapping), target_vocab_size)
     mapping[:limit] = np.arange(limit, dtype=np.int64)
+
+
+def display_surface(text: str, max_len: int = 48) -> str:
+    shown = text.encode("unicode_escape", errors="backslashreplace").decode("ascii", errors="replace")
+    if len(shown) > max_len:
+        return shown[: max_len - 3] + "..."
+    return shown
+
+
+def decode_token_text(adapter, token_id: int) -> str:
+    try:
+        return adapter.decode([int(token_id)])
+    except Exception:
+        try:
+            return adapter.token_bytes(int(token_id)).decode("utf-8", errors="replace")
+        except Exception:
+            return f"<INVALID:{int(token_id)}>"
+
+
+def surface_class(text: str) -> str:
+    if text == "":
+        return "empty"
+    stripped = text.strip(" \t\r\n")
+    if "\n" in text:
+        return "newline"
+    if text.isspace():
+        return "whitespace"
+    prefix = "leading_space_" if text.startswith((" ", "Ġ", "▁")) else ""
+    core = stripped.lstrip("Ġ▁")
+    if core == "":
+        return prefix + "marker"
+    if core in {".", "!", "?", ";", ":"}:
+        return prefix + "sentence_punct"
+    if core == ",":
+        return prefix + "comma"
+    if all(ch in "\"'`“”‘’()[]{}<>-/\\|_*&^%$#@~+=،。．，、" for ch in core):
+        return prefix + "punct"
+    if core.isdigit():
+        return prefix + "digit"
+    if core.isalpha():
+        return prefix + "alpha"
+    if any(ch.isalpha() for ch in core) and any(ch.isdigit() for ch in core):
+        return prefix + "alnum"
+    if any(ch.isalpha() for ch in core):
+        return prefix + "mixed_alpha"
+    return prefix + "other"
+
+
+def anchor_patterns() -> list[tuple[str, object]]:
+    return [
+        ("bare_space", lambda text: text in {" ", "Ġ", "▁"}),
+        ("whitespace_no_newline", lambda text: text.isspace() and "\n" not in text),
+        ("newline", lambda text: "\n" in text),
+        ("period", lambda text: text.strip(" \t\r\nĠ▁") == "."),
+        ("comma", lambda text: text.strip(" \t\r\nĠ▁") == ","),
+        ("sentence_punct", lambda text: text.strip(" \t\r\nĠ▁") in {".", "!", "?"}),
+        ("leading_space", lambda text: text.startswith((" ", "Ġ", "▁")) and len(text.strip(" Ġ▁\t\r\n")) > 0),
+        ("leading_the", lambda text: text.lower() in {" the", "ġthe", "▁the"}),
+        ("leading_of", lambda text: text.lower() in {" of", "ġof", "▁of"}),
+        ("leading_and", lambda text: text.lower() in {" and", "ġand", "▁and"}),
+        ("digit", lambda text: text.strip(" \t\r\nĠ▁").isdigit()),
+    ]
+
+
+def zscore(values: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    out = np.zeros_like(values, dtype=np.float32)
+    if not bool(mask.any()):
+        return out
+    subset = values[mask].astype(np.float32, copy=False)
+    mean = float(subset.mean())
+    std = float(subset.std())
+    if std < 1e-8:
+        return out
+    out[mask] = (values[mask].astype(np.float32, copy=False) - mean) / std
+    return out
+
+
+def unique_neighbor_stats(
+    rows: np.ndarray,
+    cols: np.ndarray,
+    head_size: int,
+    vocab_floor: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if len(rows) == 0:
+        empty = np.zeros(head_size, dtype=np.float32)
+        return empty, empty.copy(), empty.copy()
+    flat = rows.astype(np.int64, copy=False) * int(vocab_floor) + cols.astype(np.int64, copy=False)
+    uniq, pair_counts = np.unique(flat, return_counts=True)
+    uniq_rows = (uniq // int(vocab_floor)).astype(np.int64, copy=False)
+    totals = np.bincount(uniq_rows, weights=pair_counts.astype(np.float64), minlength=head_size)
+    distinct = np.bincount(uniq_rows, minlength=head_size).astype(np.float32)
+    probs = pair_counts.astype(np.float64) / np.maximum(totals[uniq_rows], 1.0)
+    entropy = np.bincount(uniq_rows, weights=-(probs * np.log2(np.maximum(probs, 1e-12))), minlength=head_size)
+    return distinct.astype(np.float32), entropy.astype(np.float32), totals.astype(np.float32)
+
+
+def pagerank_from_edges(
+    rows: np.ndarray,
+    cols: np.ndarray,
+    weights: np.ndarray,
+    size: int,
+    iters: int = 40,
+    damping: float = 0.85,
+) -> np.ndarray:
+    if size == 0:
+        return np.empty(0, dtype=np.float32)
+    out_weight = np.bincount(rows, weights=weights.astype(np.float64), minlength=size)
+    valid = out_weight[rows] > 0
+    rows = rows[valid]
+    cols = cols[valid]
+    weights = weights[valid].astype(np.float64, copy=False)
+    pr = np.full(size, 1.0 / size, dtype=np.float64)
+    teleport = (1.0 - damping) / size
+    dangling_mask = out_weight <= 0
+    for _ in range(iters):
+        nxt = np.full(size, teleport, dtype=np.float64)
+        if len(rows):
+            contrib = pr[rows] * weights / np.maximum(out_weight[rows], 1e-12)
+            np.add.at(nxt, cols, damping * contrib)
+        if bool(dangling_mask.any()):
+            nxt += damping * float(pr[dangling_mask].sum()) / size
+        total = float(nxt.sum())
+        if total > 0:
+            nxt /= total
+        pr = nxt
+    return pr.astype(np.float32)
+
+
+def approximate_spectral_features(
+    rows: np.ndarray,
+    cols: np.ndarray,
+    weights: np.ndarray,
+    size: int,
+    dims: int,
+    iters: int,
+) -> np.ndarray:
+    if size == 0 or dims <= 0 or len(rows) == 0:
+        return np.zeros((size, 0), dtype=np.float32)
+    sym_rows = np.concatenate([rows, cols]).astype(np.int64, copy=False)
+    sym_cols = np.concatenate([cols, rows]).astype(np.int64, copy=False)
+    sym_weights = np.concatenate([weights, weights]).astype(np.float32, copy=False)
+    degree = np.bincount(sym_rows, weights=sym_weights.astype(np.float64), minlength=size).astype(np.float32)
+    keep = (degree[sym_rows] > 0) & (degree[sym_cols] > 0)
+    sym_rows = sym_rows[keep]
+    sym_cols = sym_cols[keep]
+    norm_weights = sym_weights[keep] / np.sqrt(degree[sym_rows] * degree[sym_cols])
+    rng = np.random.default_rng(SEED)
+    q = rng.standard_normal((size, dims)).astype(np.float32)
+    q, _ = np.linalg.qr(q)
+    q = q.astype(np.float32, copy=False)
+    for _ in range(max(1, iters)):
+        z = np.zeros_like(q)
+        np.add.at(z, sym_cols, norm_weights[:, None] * q[sym_rows])
+        q, _ = np.linalg.qr(z)
+        q = q.astype(np.float32, copy=False)
+    return q
+
+
+def structural_graph_stats(ids: np.ndarray, vocab_size: int, top_n: int, spectral_dims: int) -> dict[str, np.ndarray]:
+    ids = np.asarray(ids[: min(len(ids), STRUCTURAL_AUDIT_TOKEN_LIMIT)], dtype=np.int64)
+    vocab_floor = int(max(vocab_size, int(ids.max(initial=0)) + 1))
+    token_counts = counts(ids, vocab_floor)
+    observed = int(np.count_nonzero(token_counts))
+    head_size = min(top_n, observed)
+    head = np.argsort(-token_counts)[:head_size].astype(np.int64)
+    lookup = np.full(vocab_floor, -1, dtype=np.int32)
+    lookup[head] = np.arange(head_size, dtype=np.int32)
+
+    prev = ids[:-1]
+    nxt = ids[1:]
+    prev_head = lookup[prev]
+    next_head = lookup[nxt]
+
+    right_mask = prev_head >= 0
+    right_distinct, right_entropy, right_total = unique_neighbor_stats(
+        prev_head[right_mask], nxt[right_mask], head_size, vocab_floor
+    )
+    left_mask = next_head >= 0
+    left_distinct, left_entropy, left_total = unique_neighbor_stats(
+        next_head[left_mask], prev[left_mask], head_size, vocab_floor
+    )
+
+    both_mask = (prev_head >= 0) & (next_head >= 0)
+    if bool(both_mask.any()):
+        flat = prev_head[both_mask].astype(np.int64, copy=False) * head_size + next_head[both_mask].astype(
+            np.int64, copy=False
+        )
+        uniq, edge_weights = np.unique(flat, return_counts=True)
+        edge_rows = (uniq // head_size).astype(np.int64, copy=False)
+        edge_cols = (uniq % head_size).astype(np.int64, copy=False)
+        edge_weights = edge_weights.astype(np.float32, copy=False)
+    else:
+        edge_rows = np.empty(0, dtype=np.int64)
+        edge_cols = np.empty(0, dtype=np.int64)
+        edge_weights = np.empty(0, dtype=np.float32)
+
+    pagerank = pagerank_from_edges(edge_rows, edge_cols, edge_weights, head_size)
+    spectral = approximate_spectral_features(
+        edge_rows,
+        edge_cols,
+        edge_weights,
+        head_size,
+        spectral_dims,
+        STRUCTURAL_AUDIT_SPECTRAL_ITERS,
+    )
+
+    full = {
+        "count": np.zeros(vocab_floor, dtype=np.float32),
+        "right_entropy": np.zeros(vocab_floor, dtype=np.float32),
+        "left_entropy": np.zeros(vocab_floor, dtype=np.float32),
+        "right_distinct": np.zeros(vocab_floor, dtype=np.float32),
+        "left_distinct": np.zeros(vocab_floor, dtype=np.float32),
+        "pagerank": np.zeros(vocab_floor, dtype=np.float32),
+        "hub_score": np.full(vocab_floor, -1.0e9, dtype=np.float32),
+        "punct_score": np.full(vocab_floor, -1.0e9, dtype=np.float32),
+    }
+    full["count"][: len(token_counts)] = token_counts.astype(np.float32)
+    for name, values in (
+        ("right_entropy", right_entropy),
+        ("left_entropy", left_entropy),
+        ("right_distinct", right_distinct),
+        ("left_distinct", left_distinct),
+        ("pagerank", pagerank),
+    ):
+        full[name][head] = values
+
+    head_mask = np.zeros(vocab_floor, dtype=bool)
+    head_mask[head] = True
+    log_count = np.zeros(vocab_floor, dtype=np.float32)
+    log_count[head] = np.log1p(token_counts[head]).astype(np.float32)
+    log_right_distinct = np.zeros(vocab_floor, dtype=np.float32)
+    log_left_distinct = np.zeros(vocab_floor, dtype=np.float32)
+    log_pagerank = np.zeros(vocab_floor, dtype=np.float32)
+    log_right_distinct[head] = np.log1p(right_distinct).astype(np.float32)
+    log_left_distinct[head] = np.log1p(left_distinct).astype(np.float32)
+    log_pagerank[head] = np.log(np.maximum(pagerank, 1e-12)).astype(np.float32)
+    full["hub_score"][head] = (
+        zscore(log_count, head_mask)[head]
+        + zscore(full["right_entropy"], head_mask)[head]
+        + zscore(log_right_distinct, head_mask)[head]
+        + zscore(log_pagerank, head_mask)[head]
+    )
+    full["punct_score"][head] = (
+        zscore(full["right_entropy"], head_mask)[head]
+        + zscore(full["left_entropy"], head_mask)[head]
+        + zscore(log_right_distinct, head_mask)[head]
+        + zscore(log_left_distinct, head_mask)[head]
+    )
+
+    feature_parts = [
+        zscore(log_count, head_mask)[head],
+        zscore(full["right_entropy"], head_mask)[head],
+        zscore(full["left_entropy"], head_mask)[head],
+        zscore(log_right_distinct, head_mask)[head],
+        zscore(log_left_distinct, head_mask)[head],
+        zscore(log_pagerank, head_mask)[head],
+    ]
+    features = np.column_stack(feature_parts).astype(np.float32)
+    if spectral.shape[1]:
+        features = np.concatenate([features, spectral.astype(np.float32)], axis=1)
+    norm = np.linalg.norm(features, axis=1, keepdims=True)
+    features = features / np.maximum(norm, 1e-8)
+
+    return {
+        "head": head,
+        "token_counts": token_counts.astype(np.int64, copy=False),
+        "right_total": right_total,
+        "left_total": left_total,
+        "edge_rows": edge_rows,
+        "edge_cols": edge_cols,
+        "edge_weights": edge_weights,
+        "features": features,
+        **full,
+    }
+
+
+def rank_array(scores: np.ndarray) -> np.ndarray:
+    order = np.argsort(-scores)
+    ranks = np.empty(len(scores), dtype=np.int64)
+    ranks[order] = np.arange(1, len(scores) + 1, dtype=np.int64)
+    return ranks
+
+
+def structural_anchor_audit(task) -> dict[str, object]:
+    source_vocab = task.source_adapter.spec.vocab_size
+    target_vocab = task.target_adapter.spec.vocab_size
+    token_limit = min(len(task.cipher_ids), STRUCTURAL_AUDIT_TOKEN_LIMIT)
+    ref_limit = min(len(task.ref_ids), STRUCTURAL_AUDIT_TOKEN_LIMIT)
+    print(
+        f"structural_anchor_audit: top_n={STRUCTURAL_AUDIT_TOP_N} tokens={token_limit} "
+        f"ref_tokens={ref_limit} spectral_dims={STRUCTURAL_AUDIT_SPECTRAL_DIMS}",
+        flush=True,
+    )
+    cipher_stats = structural_graph_stats(
+        task.cipher_ids[:token_limit],
+        max(source_vocab, int(task.cipher_ids.max(initial=0)) + 1),
+        STRUCTURAL_AUDIT_TOP_N,
+        STRUCTURAL_AUDIT_SPECTRAL_DIMS,
+    )
+    target_stats = structural_graph_stats(
+        task.ref_ids[:ref_limit],
+        target_vocab,
+        STRUCTURAL_AUDIT_TOP_N,
+        STRUCTURAL_AUDIT_SPECTRAL_DIMS,
+    )
+    inverse_perm = np.empty(len(task.perm), dtype=np.int64)
+    inverse_perm[np.asarray(task.perm, dtype=np.int64)] = np.arange(len(task.perm), dtype=np.int64)
+
+    source_label_cache: dict[int, tuple[str, str, str]] = {}
+    target_label_cache: dict[int, tuple[str, str, str]] = {}
+
+    def source_label(cipher_id: int) -> tuple[int, str, str, str]:
+        source_id = int(inverse_perm[int(cipher_id)]) if int(cipher_id) < len(inverse_perm) else -1
+        if source_id not in source_label_cache:
+            text = decode_token_text(task.source_adapter, source_id) if source_id >= 0 else ""
+            source_label_cache[source_id] = (surface_class(text), text, display_surface(text))
+        cls, text, shown = source_label_cache[source_id]
+        return source_id, cls, text, shown
+
+    def target_label(token_id: int) -> tuple[str, str, str]:
+        token_id = int(token_id)
+        if token_id not in target_label_cache:
+            text = decode_token_text(task.target_adapter, token_id)
+            target_label_cache[token_id] = (surface_class(text), text, display_surface(text))
+        return target_label_cache[token_id]
+
+    def top_records(stats: dict[str, np.ndarray], score_name: str, source: bool) -> list[dict[str, object]]:
+        scores = stats[score_name]
+        order = np.argsort(-scores)[:STRUCTURAL_AUDIT_REPORT_TOP]
+        records: list[dict[str, object]] = []
+        for rank, token_id in enumerate(order, start=1):
+            if scores[token_id] <= -1.0e8:
+                continue
+            if source:
+                src_id, cls, _, shown = source_label(int(token_id))
+                record = {"rank": rank, "cipher_id": int(token_id), "source_id": src_id}
+            else:
+                cls, _, shown = target_label(int(token_id))
+                record = {"rank": rank, "target_id": int(token_id)}
+            record.update(
+                {
+                    "score": float(scores[token_id]),
+                    "count": int(stats["count"][token_id]),
+                    "pagerank": float(stats["pagerank"][token_id]),
+                    "right_entropy": float(stats["right_entropy"][token_id]),
+                    "left_entropy": float(stats["left_entropy"][token_id]),
+                    "right_distinct": int(stats["right_distinct"][token_id]),
+                    "left_distinct": int(stats["left_distinct"][token_id]),
+                    "class": cls,
+                    "surface": shown,
+                }
+            )
+            records.append(record)
+        return records
+
+    score_names = ["count", "pagerank", "hub_score", "right_entropy", "right_distinct", "punct_score"]
+    cipher_top = {name: top_records(cipher_stats, name, source=True) for name in score_names}
+    target_top = {name: top_records(target_stats, name, source=False) for name in score_names}
+
+    source_counts = counts(task.secret_ids[:token_limit], source_vocab)
+    source_head = np.argsort(-source_counts)[: min(STRUCTURAL_AUDIT_LABEL_TOP, np.count_nonzero(source_counts))]
+    score_ranks = {name: rank_array(cipher_stats[name]) for name in score_names}
+    anchor_results: list[dict[str, object]] = []
+    for anchor_name, predicate in anchor_patterns():
+        best_source = -1
+        best_text = ""
+        for source_id in source_head:
+            text = decode_token_text(task.source_adapter, int(source_id))
+            if predicate(text):  # type: ignore[operator]
+                best_source = int(source_id)
+                best_text = text
+                break
+        if best_source < 0:
+            anchor_results.append({"anchor": anchor_name, "found": False})
+            continue
+        cipher_id = int(task.perm[best_source])
+        result = {
+            "anchor": anchor_name,
+            "found": True,
+            "source_id": best_source,
+            "cipher_id": cipher_id,
+            "source_count": int(source_counts[best_source]),
+            "class": surface_class(best_text),
+            "surface": display_surface(best_text),
+            "metric_ranks": {name: int(score_ranks[name][cipher_id]) for name in score_names},
+            "metric_scores": {name: float(cipher_stats[name][cipher_id]) for name in score_names},
+        }
+        anchor_results.append(result)
+
+    c_head = cipher_stats["head"][: min(1000, len(cipher_stats["head"]))]
+    t_head = target_stats["head"][: min(1000, len(target_stats["head"]))]
+    c_features = cipher_stats["features"][: len(c_head)]
+    t_features = target_stats["features"][: len(t_head)]
+    class_match_summary: dict[str, dict[str, float]] = {}
+    nearest_examples: list[dict[str, object]] = []
+    if len(c_head) and len(t_head):
+        sims = c_features @ t_features.T
+        nearest = np.argmax(sims, axis=1)
+        pred_classes = []
+        true_classes = []
+        for idx, cipher_id in enumerate(c_head):
+            _, true_cls, _, shown = source_label(int(cipher_id))
+            pred_token = int(t_head[int(nearest[idx])])
+            pred_cls, _, pred_shown = target_label(pred_token)
+            pred_classes.append(pred_cls)
+            true_classes.append(true_cls)
+            if len(nearest_examples) < STRUCTURAL_AUDIT_REPORT_TOP:
+                nearest_examples.append(
+                    {
+                        "cipher_id": int(cipher_id),
+                        "source_id": int(inverse_perm[int(cipher_id)]),
+                        "source_class": true_cls,
+                        "source_surface": shown,
+                        "nearest_target_id": pred_token,
+                        "nearest_target_class": pred_cls,
+                        "nearest_target_surface": pred_shown,
+                        "similarity": float(sims[idx, nearest[idx]]),
+                    }
+                )
+        pred_arr = np.asarray(pred_classes)
+        true_arr = np.asarray(true_classes)
+        for k in (100, 500, 1000):
+            n = min(k, len(true_arr))
+            if n:
+                class_match_summary[f"top{n}"] = {
+                    "exact_class_accuracy": float(np.mean(pred_arr[:n] == true_arr[:n])),
+                    "leading_space_rate_true": float(np.mean(np.char.startswith(true_arr[:n].astype(str), "leading_space"))),
+                    "leading_space_rate_pred": float(np.mean(np.char.startswith(pred_arr[:n].astype(str), "leading_space"))),
+                }
+
+    report: dict[str, object] = {
+        "source_tokenizer": task.source_adapter.spec.name,
+        "target_tokenizer": task.target_adapter.spec.name,
+        "token_limit": int(token_limit),
+        "ref_limit": int(ref_limit),
+        "top_n": int(STRUCTURAL_AUDIT_TOP_N),
+        "spectral_dims": int(STRUCTURAL_AUDIT_SPECTRAL_DIMS),
+        "cipher_top": cipher_top,
+        "target_top": target_top,
+        "anchor_results": anchor_results,
+        "nearest_target_class_summary": class_match_summary,
+        "nearest_target_examples": nearest_examples,
+    }
+
+    print("--- structural top cipher nodes ---", flush=True)
+    for name in score_names:
+        print(f"[cipher:{name}]", flush=True)
+        for rec in cipher_top[name][: min(8, len(cipher_top[name]))]:
+            print(
+                f"  #{rec['rank']} c={rec['cipher_id']} src={rec['source_id']} "
+                f"count={rec['count']} pr={rec['pagerank']:.3e} cls={rec['class']} surf={rec['surface']}",
+                flush=True,
+            )
+    print("--- structural anchor oracle ranks ---", flush=True)
+    for result in anchor_results:
+        if not result.get("found"):
+            print(f"  {result['anchor']}: not found in top source labels", flush=True)
+            continue
+        ranks = result["metric_ranks"]
+        print(
+            f"  {result['anchor']}: c={result['cipher_id']} src={result['source_id']} "
+            f"count={result['source_count']} cls={result['class']} surf={result['surface']} "
+            f"ranks={ranks}",
+            flush=True,
+        )
+    print("--- nearest target class summary ---", flush=True)
+    print(json.dumps(class_match_summary, indent=2), flush=True)
+    return report
+
+
+def find_target_surface_id(adapter, token_counts: np.ndarray, surfaces: tuple[str, ...]) -> int | None:
+    wanted = set(surfaces)
+    best_id: int | None = None
+    best_count = -1
+    for token_id in np.argsort(-token_counts):
+        text = decode_token_text(adapter, int(token_id))
+        if text not in wanted:
+            continue
+        count = int(token_counts[int(token_id)])
+        if count > best_count:
+            best_id = int(token_id)
+            best_count = count
+    return best_id
+
+
+def first_ranked_unused(scores: np.ndarray, used: set[int]) -> int | None:
+    for token_id in np.argsort(-scores):
+        token_id = int(token_id)
+        if scores[token_id] <= -1.0e8:
+            return None
+        if token_id not in used:
+            return token_id
+    return None
+
+
+def period_like_candidate(stats: dict[str, np.ndarray], used: set[int]) -> int | None:
+    punct_rank = rank_array(stats["punct_score"])
+    right_entropy_rank = rank_array(stats["right_entropy"])
+    for token_id in np.argsort(-stats["pagerank"]):
+        token_id = int(token_id)
+        if stats["pagerank"][token_id] <= 0:
+            return None
+        if token_id in used:
+            continue
+        if punct_rank[token_id] <= 12 and right_entropy_rank[token_id] >= 20:
+            return token_id
+    return None
+
+
+def structural_seed_anchor_pairs(
+    cipher_ids: np.ndarray,
+    ref_ids: np.ndarray,
+    target_adapter,
+    source_vocab_size: int,
+    target_vocab_size: int,
+) -> dict[int, int]:
+    if not STRUCTURAL_SEED_ANCHORS:
+        return {}
+    stats = structural_graph_stats(
+        cipher_ids,
+        max(source_vocab_size, int(cipher_ids.max(initial=0)) + 1),
+        STRUCTURAL_AUDIT_TOP_N,
+        0,
+    )
+    target_counts = counts(ref_ids, target_vocab_size)
+    target_by_surface: dict[str, int] = {}
+    for surface in (".", ",", " the", *STRUCTURAL_SEED_COMMON_SURFACES):
+        token_id = find_target_surface_id(target_adapter, target_counts, (surface,))
+        if token_id is not None:
+            target_by_surface[surface] = token_id
+
+    anchors: dict[int, int] = {}
+    used_c: set[int] = set()
+    used_p: set[int] = set()
+
+    def add(surface: str, cipher_id: int | None) -> None:
+        if cipher_id is None:
+            return
+        target_id = target_by_surface.get(surface)
+        if target_id is None or cipher_id in used_c or target_id in used_p:
+            return
+        anchors[int(cipher_id)] = int(target_id)
+        used_c.add(int(cipher_id))
+        used_p.add(int(target_id))
+
+    add(" the", first_ranked_unused(stats["hub_score"], used_c))
+    add(",", first_ranked_unused(stats["punct_score"], used_c))
+    add(".", period_like_candidate(stats, used_c))
+    for surface in STRUCTURAL_SEED_COMMON_SURFACES:
+        add(surface, first_ranked_unused(stats["hub_score"], used_c))
+
+    if anchors:
+        print("structural_seed_anchors:", flush=True)
+        for c, p in anchors.items():
+            print(
+                f"  c={c} -> p={p} target={display_surface(decode_token_text(target_adapter, p))}",
+                flush=True,
+            )
+    return anchors
+
+
+def apply_fixed_anchors(mapping: np.ndarray, anchors: dict[int, int]) -> None:
+    for c, p in anchors.items():
+        if c < len(mapping):
+            mapping[int(c)] = int(p)
+
+
+def standardize_feature_column(values: np.ndarray) -> np.ndarray:
+    values = values.astype(np.float32, copy=False)
+    mask = np.isfinite(values) & (values != 0)
+    out = np.zeros_like(values, dtype=np.float32)
+    if not bool(mask.any()):
+        return out
+    mean = float(values[mask].mean())
+    std = float(values[mask].std())
+    if std < 1e-8:
+        return out
+    out[mask] = (values[mask] - mean) / std
+    return out
+
+
+def structural_feature_matrix(stats: dict[str, np.ndarray], focus: np.ndarray) -> np.ndarray:
+    columns = [
+        stats["right_entropy"][focus],
+        stats["left_entropy"][focus],
+        np.log1p(stats["right_distinct"][focus]),
+        np.log1p(stats["left_distinct"][focus]),
+        np.log(np.maximum(stats["pagerank"][focus], 1e-12)),
+    ]
+    features = np.column_stack([standardize_feature_column(col) for col in columns]).astype(np.float32)
+    norms = np.linalg.norm(features, axis=1, keepdims=True)
+    return features / np.maximum(norms, 1e-8)
 
 
 def torch_context_maps(ids: np.ndarray, focus: np.ndarray, anchors: np.ndarray, device: str, offset: int = 1):
@@ -410,7 +1017,8 @@ def refine_with_bigram_objective(
     return mapping
 
 
-def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_size: int) -> np.ndarray:
+def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_adapter) -> np.ndarray:
+    target_vocab_size = target_adapter.spec.vocab_size
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device: {device}", flush=True)
     candidate_window = effective_candidate_window(len(cipher_ids))
@@ -439,6 +1047,35 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
             mapped = source_ids.astype(np.int64)
         mapping[: len(c_counts)] = np.clip(mapped, 0, target_vocab_size - 1)
     apply_id_lock(mapping, target_vocab_size)
+    fixed_anchors = structural_seed_anchor_pairs(
+        cipher_ids,
+        ref_ids,
+        target_adapter,
+        len(c_counts),
+        target_vocab_size,
+    )
+    if STRUCTURAL_SEED_LOCK:
+        apply_fixed_anchors(mapping, fixed_anchors)
+    c_struct = p_struct = None
+    if STRUCTURAL_FEATURES:
+        c_stats = structural_graph_stats(
+            cipher_ids,
+            len(c_counts),
+            STRUCTURAL_FEATURE_TOP_N,
+            0,
+        )
+        p_stats = structural_graph_stats(
+            ref_ids,
+            target_vocab_size,
+            STRUCTURAL_FEATURE_TOP_N,
+            0,
+        )
+        c_struct = structural_feature_matrix(c_stats, c_focus)
+        p_struct = structural_feature_matrix(p_stats, p_focus)
+        print(
+            f"structural_features: top_n={STRUCTURAL_FEATURE_TOP_N} weight={STRUCTURAL_FEATURE_WEIGHT}",
+            flush=True,
+        )
 
     c_log = np.log(np.maximum(c_counts, 1) / max(1, int(c_counts.sum())))
     p_log = np.log(np.maximum(p_counts, 1) / max(1, int(p_counts.sum())))
@@ -484,6 +1121,13 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
                 p_parts.extend([p_left2, p_right2])
             c_vec = normalize_features(torch.cat(c_parts, dim=1), c_counts[c_focus], device)
             p_vec = normalize_features(torch.cat(p_parts, dim=1), p_counts[p_focus], device)
+            if c_struct is not None and p_struct is not None:
+                c_extra = torch.as_tensor(c_struct, dtype=torch.float32, device=device) * STRUCTURAL_FEATURE_WEIGHT
+                p_extra = torch.as_tensor(p_struct, dtype=torch.float32, device=device) * STRUCTURAL_FEATURE_WEIGHT
+                c_vec = torch.cat([c_vec, c_extra], dim=1)
+                p_vec = torch.cat([p_vec, p_extra], dim=1)
+                c_vec = c_vec / torch.linalg.vector_norm(c_vec, dim=1, keepdim=True).clamp_min(1e-12)
+                p_vec = p_vec / torch.linalg.vector_norm(p_vec, dim=1, keepdim=True).clamp_min(1e-12)
             del c_parts, p_parts, c_left, c_right, p_left, p_right
             if use_skip_context:
                 del c_left2, c_right2, p_left2, p_right2
@@ -505,11 +1149,11 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
                 torch.cuda.empty_cache()
 
         edges.sort(reverse=True)
-        used_c: set[int] = set()
-        used_p: set[int] = set()
-        assigned_p_by_c: dict[int, int] = {}
-        assigned_c_by_p: dict[int, int] = {}
-        assigned_score_by_c: dict[int, float] = {}
+        used_c: set[int] = set(fixed_anchors) if STRUCTURAL_SEED_LOCK else set()
+        used_p: set[int] = set(fixed_anchors.values()) if STRUCTURAL_SEED_LOCK else set()
+        assigned_p_by_c: dict[int, int] = dict(fixed_anchors) if STRUCTURAL_SEED_LOCK else {}
+        assigned_c_by_p: dict[int, int] = {p: c for c, p in fixed_anchors.items()} if STRUCTURAL_SEED_LOCK else {}
+        assigned_score_by_c: dict[int, float] = {c: 1.0e9 for c in fixed_anchors} if STRUCTURAL_SEED_LOCK else {}
         score_by_c: dict[int, dict[int, float]] | None = {} if use_dynamic_anchors and ENABLE_DYNAMIC_ASSIGNMENT_SWAPS else None
         if score_by_c is not None:
             for score, c, p in edges:
@@ -530,6 +1174,8 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
                 current_p = assigned_p_by_c.get(c)
                 other_c = assigned_c_by_p.get(p)
                 if current_p is None or other_c is None or current_p == p or other_c == c:
+                    continue
+                if STRUCTURAL_SEED_LOCK and (c in fixed_anchors or other_c in fixed_anchors):
                     continue
                 other_scores = score_by_c.get(other_c)
                 if other_scores is None:
@@ -555,6 +1201,8 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
         for c, p in assigned_p_by_c.items():
             next_mapping[c] = p
         apply_id_lock(next_mapping, target_vocab_size)
+        if STRUCTURAL_SEED_LOCK:
+            apply_fixed_anchors(next_mapping, fixed_anchors)
         mapping = next_mapping
         if round_idx == rounds - 1 and (use_dynamic_anchors or BIGRAM_REFINE_ALL_SCALES):
             mapping = refine_with_bigram_objective(
@@ -567,6 +1215,8 @@ def align_shuffled(cipher_ids: np.ndarray, ref_ids: np.ndarray, target_vocab_siz
                 p_counts,
             )
             apply_id_lock(mapping, target_vocab_size)
+            if STRUCTURAL_SEED_LOCK:
+                apply_fixed_anchors(mapping, fixed_anchors)
         if use_dynamic_anchors and len(assigned_scores) >= 64:
             assigned_scores.sort(reverse=True)
             next_anchor_rows: list[int] = []
@@ -602,7 +1252,18 @@ def main() -> None:
     print(f"reference_tokens: {len(task.ref_ids):,}")
     print(f"unshuffled_source_ids: {UNSHUFFLED_SOURCE_IDS}")
 
-    mapping = align_shuffled(cipher_stream, task.ref_ids, task.target_adapter.spec.vocab_size)
+    if STRUCTURAL_ANCHOR_AUDIT:
+        report = structural_anchor_audit(task)
+        out_dir = CACHE_DIR / "runs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "structural_anchor_audit.json").write_text(
+            json.dumps(report, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        print(f"wrote_structural_anchor_audit: {out_dir / 'structural_anchor_audit.json'}", flush=True)
+        return
+
+    mapping = align_shuffled(cipher_stream, task.ref_ids, task.target_adapter)
     mapped_sample = mapping[cipher_stream[:SAMPLE_TOKENS]]
     recovered_sample = task.target_adapter.decode(mapped_sample.tolist())
     metrics = evaluate_recovery(task, recovered_sample, SAMPLE_TOKENS)
@@ -635,6 +1296,12 @@ def main() -> None:
         "id_init_mode": ID_INIT_MODE,
         "id_exact_bonus": ID_EXACT_BONUS,
         "id_lock_prefix": ID_LOCK_PREFIX,
+        "structural_seed_anchors": STRUCTURAL_SEED_ANCHORS,
+        "structural_seed_lock": STRUCTURAL_SEED_LOCK,
+        "structural_seed_common_surfaces": STRUCTURAL_SEED_COMMON_SURFACES,
+        "structural_features": STRUCTURAL_FEATURES,
+        "structural_feature_top_n": STRUCTURAL_FEATURE_TOP_N,
+        "structural_feature_weight": STRUCTURAL_FEATURE_WEIGHT,
         "elapsed_seconds": time.time() - t0,
         "metrics": metrics,
         "preview": recovered_sample[:1000],
