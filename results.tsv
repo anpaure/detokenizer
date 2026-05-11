@@ -120,3 +120,4 @@ cff784e	qwen36-o200k-100k-screen	0.489720	0.489720	2.762881	6.3	discard	first-or
 60d72f3	qwen36-o200k-100k-structural-features-w025	0.488780	0.488780	2.746108	0.0	discard	appending PageRank entropy and degree features at weight 0.25 overpowers context matching
 60d72f3	qwen36-o200k-100k-structural-features-w005	0.473100	0.473100	2.717546	0.0	discard	low-weight structural feature regularization still regresses hard-screen CER
 60d72f3	mistral-o200k-100k-structural-period-heuristic	0.000000	0.000000	0.000000	0.0	discard	period seed heuristic is unsafe at 100k; it selected a common leading-word node on Mistral before evaluation
+739411e	gemma-o200k-100m-slim-baseline	0.185720	0.185720	2.815607	0.0	baseline	restored slim decoder at 100M target-token request; Gemma fixture produced 98.884M source tokens from fixed FineWeb target text
