@@ -171,3 +171,11 @@ f6344fb	gemma-o200k-100m-unshuffled-lock192	0.118980	0.118980	2.832837	2.4	diagn
 0c07f36	gemma-o200k-100m-deshuffle-freq-rank-soft-w012	0.211580	0.211580	2.765480	2.4	discard	soft frequency-rank prior weight 0.12 crosses into over-regularization
 0c07f36	gemma-o200k-100m-deshuffle-freq-rank-soft-w015	0.216020	0.216020	2.869298	2.4	discard	soft frequency-rank prior weight 0.15 over-constrains and regresses
 0c07f36	gemma-o200k-100m-deshuffle-freq-rank-soft-w020	0.175960	0.175960	2.749669	2.4	discard	soft frequency-rank prior weight 0.20 is unstable and worse than 0.10
+56c30af	gemma-o200k-1m-deshuffle-rank-soft-w010	0.318220	0.318220	2.797819	3.6	discard	soft frequency-rank prior needs more data; at Gemma to o200k 1m it regresses versus slim
+56c30af	gemma-o200k-1m-unshuffled-lock192-seed	0.298040	0.298040	2.796424	3.6	diagnostic	true unshuffled low-ID lock plus structural anchors improves 1m but is weaker than adding structural features
+56c30af	gemma-o200k-10m-deshuffle-rank-soft-w010	0.210820	0.210820	2.740789	2.3	diagnostic	soft frequency-rank prior becomes useful at 10m but remains far behind true unshuffled ID order
+56c30af	gemma-o200k-10m-unshuffled-lock192-seed	0.162880	0.162880	2.824757	2.3	keep	true unshuffled low-ID lock plus structural anchors gives large Gemma to o200k 10m gain
+56c30af	o200k-qwen36-1m-deshuffle-rank-soft-w010	0.291780	0.291780	2.740887	4.2	diagnostic	soft frequency-rank prior works better for o200k to qwen36 at 1m than for Gemma to o200k
+56c30af	o200k-qwen36-1m-unshuffled-lock192-seed	0.270540	0.270540	2.688591	3.5	keep	true unshuffled low-ID lock plus structural anchors beats soft frequency-rank prior at 1m
+56c30af	o200k-qwen36-10m-deshuffle-rank-soft-w010	0.128280	0.128280	2.680815	2.3	diagnostic	soft frequency-rank prior scales strongly on o200k to qwen36 at 10m
+56c30af	o200k-qwen36-10m-unshuffled-lock192-seed	0.117900	0.117900	2.678676	2.3	keep	true unshuffled low-ID lock plus structural anchors remains best at 10m, but soft rank closes much of the gap
